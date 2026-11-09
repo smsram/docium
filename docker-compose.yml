@@ -1,0 +1,31 @@
+version: '3.8'
+
+services:
+  docium:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: docium-app
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=production
+      - PORT=3000
+    # If running Ollama on host, you can communicate via host.docker.internal
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  # Optional local Ollama service for 100% offline air-gapped AI
+  # Uncomment below if you want Docker Compose to run Ollama automatically:
+  # ollama:
+  #   image: ollama/ollama:latest
+  #   container_name: docium-ollama
+  #   restart: unless-stopped
+  #   ports:
+  #     - "11434:11434"
+  #   volumes:
+  #     - ollama_data:/root/.ollama
+
+# volumes:
+#   ollama_data:
