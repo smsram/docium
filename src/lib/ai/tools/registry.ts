@@ -5,6 +5,16 @@
  */
 
 import { ToolDefinition, ToolExecutionContext, ToolResult } from './types';
+import {
+  TOOL_CATALOG,
+  searchToolCatalogTool,
+  loadToolDefinitionsTool,
+  getCatalogTool,
+  getAllImplementedCatalogTools,
+  getAvailableCatalogTools,
+  catalogToNormalizedToolDefinitions,
+  ToolCatalogEntry,
+} from './catalog';
 import { conversationTools } from './conversationTools';
 import { sourceTools } from './sourceTools';
 import { imageTools } from './imageTools';
@@ -20,6 +30,7 @@ import { pdfTools } from './pdfTools';
 import { researchTools } from './researchTools';
 import { workspaceTools } from './workspaceTools';
 import { NormalizedToolDefinition } from '../adapters/base';
+import { assertWorkspaceBoundary, WorkspaceSecurityViolationError } from '../security/workspaceBoundary';
 
 export const ALL_TOOLS: ToolDefinition[] = [
   ...conversationTools,
@@ -143,7 +154,8 @@ export async function executeTool(
   context: ToolExecutionContext,
   timeoutMs = 12000
 ): Promise<ToolResult> {
-  const tool = getToolByName(toolName);
+  const catalogTool = getCatalogTool(toolName);
+  const tool = catalogTool || getToolByName(toolName);
   if (!tool) {
     return {
       success: false,
@@ -163,6 +175,37 @@ export async function executeTool(
         };
       }
     }
+  }
+
+  // Strict Architectural Workspace Isolation Boundary Check
+  const targetResources: string[] = [];
+  if (typeof args.documentId === 'string') targetResources.push(args.documentId);
+  if (typeof args.itemId === 'string') targetResources.push(args.itemId);
+  if (typeof args.sourceId === 'string') targetResources.push(args.sourceId);
+  if (Array.isArray(args.sourceIds)) {
+    for (const sid of args.sourceIds) {
+      if (typeof sid === 'string') targetResources.push(sid);
+    }
+  }
+  if (typeof args.documentIdOrTitle === 'string') targetResources.push(args.documentIdOrTitle);
+  if (typeof args.imageIdOrFilename === 'string') targetResources.push(args.imageIdOrFilename);
+  if (typeof args.path === 'string') targetResources.push(args.path);
+
+  try {
+    for (const target of targetResources) {
+      assertWorkspaceBoundary(target, context, toolName);
+    }
+  } catch (secErr) {
+    if (secErr instanceof WorkspaceSecurityViolationError || (secErr as any)?.isSecurityViolation) {
+      return {
+        success: false,
+        isSecurityViolation: true,
+        statusCode: 'WORKSPACE_BOUNDARY_VIOLATION',
+        error: 'The task was stopped because the requested operation exceeded the active workspace boundary.',
+        activitySummary: 'Task stopped: Exceeded active workspace boundary',
+      };
+    }
+    throw secErr;
   }
 
   // Strict active-document modification permission boundary for Document workspaces
@@ -211,6 +254,15 @@ export async function executeTool(
     clearTimeout(timer);
     return result;
   } catch (err: unknown) {
+    if (err instanceof WorkspaceSecurityViolationError || (err as any)?.isSecurityViolation) {
+      return {
+        success: false,
+        isSecurityViolation: true,
+        statusCode: 'WORKSPACE_BOUNDARY_VIOLATION',
+        error: 'The task was stopped because the requested operation exceeded the active workspace boundary.',
+        activitySummary: 'Task stopped: Exceeded active workspace boundary',
+      };
+    }
     const message = err instanceof Error ? err.message : 'Tool execution error';
     return {
       success: false,
@@ -219,3 +271,15 @@ export async function executeTool(
     };
   }
 }
+
+export {
+  TOOL_CATALOG,
+  searchToolCatalogTool,
+  loadToolDefinitionsTool,
+  getCatalogTool,
+  getAllImplementedCatalogTools,
+  getAvailableCatalogTools,
+  catalogToNormalizedToolDefinitions,
+};
+export type { ToolCatalogEntry };
+

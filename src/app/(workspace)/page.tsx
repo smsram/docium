@@ -6,6 +6,7 @@ import Link from 'next/link';
 import Image from 'next/image';
 import { useWorkspaceStore } from '@/lib/store';
 import { OutputFormat, ComposerAttachment } from '@/lib/types';
+import { convertMarkdownToDocumentHtml } from '@/components/editor/utils/markdownToHtml';
 import { Toggle } from '@/components/ui/Toggle';
 import {
   Sparkles,
@@ -244,28 +245,89 @@ export default function AiCreationHomepage() {
   const recentItems = allItems.slice(0, 6);
 
   const handleCreate = async () => {
-    if (!composerDraft.prompt.trim() || isProcessing) return;
+    if (isProcessing) return;
+    const promptText = composerDraft.prompt.trim();
 
-    setIsProcessing(true);
-    setProcessingStep('Analyzing prompt & attached context...');
-
-    setTimeout(() => {
-      setProcessingStep('Structuring workspace canvas...');
-    }, 450);
-
-    setTimeout(() => {
-      setProcessingStep('Generating initial content & AI sidecar...');
-    }, 900);
-
-    setTimeout(() => {
+    // 1. Empty prompt: creates directly without calling AI provider or generating content
+    if (!promptText) {
       const newId = createFromPrompt(
-        composerDraft.prompt,
+        '',
         composerDraft.format,
         composerDraft.attachments.map((a) => ({ name: a.name, size: a.size, type: a.type })),
-        composerDraft.urls
+        composerDraft.urls,
+        '<p></p>'
       );
       router.push(`/workspace/${newId}`);
-    }, 1350);
+      return;
+    }
+
+    // 2. Provided prompt: processes prompt via selected provider/model, generating document content specifically based on that prompt
+    setIsProcessing(true);
+    setProcessingStep('Generating document content...');
+
+    let generatedContent = '';
+    try {
+      const provConfig = providers[defaultProvider];
+      const apiKey = provConfig?.apiKey || '';
+      const accountId = provConfig?.accountId || '';
+      const baseUrl = provConfig?.baseUrl || '';
+      const modelId = provConfig?.selectedModel || '';
+
+      const res = await fetch('/api/ai/agent', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          requestId: `init-${Date.now()}`,
+          workspaceId: `temp-${Date.now()}`,
+          workspaceType: composerDraft.format === 'auto' ? 'doc' : composerDraft.format,
+          userPrompt: `Generate the document body for: "${promptText}". Format strictly as clean Markdown without conversational preamble or concluding remarks.`,
+          conversationHistory: [],
+          providerId: defaultProvider,
+          modelId,
+          apiKey,
+          accountId,
+          baseUrl,
+          enabledTools: { internetSearch: false, imageGeneration: false, chartsAndData: false },
+        }),
+      });
+
+      if (res.ok && res.body) {
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split('\n\n');
+          buffer = lines.pop() || '';
+          for (const line of lines) {
+            if (line.startsWith('data: ')) {
+              try {
+                const data = JSON.parse(line.slice(6));
+                if (data.type === 'delta' && data.text) {
+                  generatedContent += data.text;
+                } else if (data.type === 'replace_content' && data.text) {
+                  generatedContent = data.text;
+                }
+              } catch {}
+            }
+          }
+        }
+      }
+    } catch (e) {
+      console.warn('[DOCIUM] Initial AI generation completed with fallback:', e);
+    }
+
+    const finalHtml = generatedContent.trim() ? convertMarkdownToDocumentHtml(generatedContent) : undefined;
+    const newId = createFromPrompt(
+      composerDraft.prompt,
+      composerDraft.format,
+      composerDraft.attachments.map((a) => ({ name: a.name, size: a.size, type: a.type })),
+      composerDraft.urls,
+      finalHtml
+    );
+    router.push(`/workspace/${newId}`);
   };
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -959,7 +1021,7 @@ export default function AiCreationHomepage() {
               <button
                 type="button"
                 onClick={handleCreate}
-                disabled={!composerDraft.prompt.trim() || isProcessing}
+                disabled={isProcessing}
                 className="inline-flex items-center gap-2 rounded-xl bg-[var(--primary)] text-white px-4 py-2 text-xs font-semibold hover:bg-[var(--primary-hover)] transition-all shadow-xs disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer focus-visible:ring-2 focus-visible:ring-[var(--primary)]/40 outline-none"
               >
                 {isProcessing ? (

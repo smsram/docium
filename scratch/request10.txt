@@ -1,0 +1,1072 @@
+<USER_REQUEST>
+
+# DOCIUM — COMPLETE DOCUMENT WORKSPACE TOOL CATALOG
+
+## OBJECTIVE
+
+Complete the Document workspace tool ecosystem by implementing the
+remaining document capabilities through the existing shared AI agent
+and dynamic Tool Registry architecture.
+
+The initial implementation already established:
+
+UNIVERSAL TOOLS:
+- list_sources
+- get_source_details
+- search_sources
+- read_source_content
+- inspect_source_image
+- get_task_scratchpad
+- update_task_scratchpad
+
+DOCUMENT TOOLS:
+- get_document_structure
+- read_document_content
+- find_document_content
+- insert_text
+- replace_text
+- delete_content
+- clear_current_page
+- apply_text_formatting
+- verify_document_state
+
+These are the initial tools, not a separate or replacement architecture.
+
+IMPORTANT:
+1. Inspect the existing codebase and current tool registry.
+2. Identify which capabilities already have working implementations.
+3. Reuse and extend existing tools whenever possible.
+4. Do not create duplicate tool names or duplicate implementations.
+5. Implement the remaining capabilities below.
+6. Every registered tool must execute a real operation.
+7. Do not register tools that are only planned or simulated.
+8. Preserve the existing document editor, ProseMirror/Tiptap structure,
+   pagination, document persistence and AI functionality.
+9. Do not rebuild the editor or AI agent.
+10. Keep all workspace-specific tools inside the Document registry.
+
+==================================================
+1. DOCUMENT CONTENT CREATION
+==================================================
+
+Implement the following tools where supported by the existing editor.
+
+- insert_paragraph
+  Insert a paragraph at a specific position.
+
+- insert_heading
+  Insert a heading with a specified heading level.
+
+- insert_list
+  Insert a bulleted or numbered list.
+
+- insert_table
+  Create a table with specified rows, columns and optional content.
+
+- insert_image
+  Insert an image using an authorized image asset or source reference.
+
+- insert_link
+  Insert a hyperlink into selected text or at a specified position.
+
+- insert_page_break
+  Insert a page break.
+
+- insert_section_break
+  Insert a supported section break.
+
+- insert_horizontal_rule
+  Insert a horizontal divider.
+
+- insert_quote
+  Insert a quotation block.
+
+- insert_code_block
+  Insert a formatted code block.
+
+- insert_equation
+  Insert a supported mathematical expression.
+
+- insert_footnote
+  Insert a footnote if supported.
+
+- insert_endnote
+  Insert an endnote if supported.
+
+- insert_table_of_contents
+  Generate a table of contents from document headings.
+
+- append_content
+  Append content to the end of the document or a specified section.
+
+- prepend_content
+  Insert content at the beginning of the document or a specified section.
+
+- insert_caption
+  Insert a caption associated with a figure or table.
+
+- insert_bookmark
+  Insert a bookmark at a document position.
+
+- insert_symbol
+  Insert a supported special character or symbol.
+
+Support structured content, not just plain-text insertion.
+
+All insertion tools must preserve the existing document model,
+content positions and editor transaction semantics.
+
+==================================================
+2. DOCUMENT CONTENT TRANSFORMATION
+==================================================
+
+Implement:
+
+- rewrite_content
+  Rewrite selected content while preserving its intended meaning.
+
+- expand_content
+  Expand selected content with relevant detail.
+
+- shorten_content
+  Condense content without losing important information.
+
+- simplify_content
+  Rewrite complex text in simpler language.
+
+- formalize_content
+  Convert informal writing into professional language.
+
+- change_content_tone
+  Change the tone according to user instructions.
+
+- translate_content
+  Translate selected content or sections into a requested language.
+
+- proofread_content
+  Correct grammar, spelling, punctuation and language issues.
+
+- continue_writing
+  Continue from a selected document position or section.
+
+- generate_document_outline
+  Generate an outline using a topic or existing document content.
+
+- generate_section_content
+  Generate content for a specified section.
+
+- generate_introduction
+  Generate an introduction for the document.
+
+- generate_conclusion
+  Generate a conclusion.
+
+- generate_summary
+  Generate an executive summary or document summary.
+
+- generate_examples
+  Generate relevant examples for selected content.
+
+- generate_faq
+  Generate frequently asked questions based on document content.
+
+- improve_content_clarity
+  Improve clarity and sentence structure.
+
+- convert_content_to_bullets
+  Convert selected content into meaningful bullet points.
+
+- convert_bullets_to_paragraph
+  Convert selected bullet points into coherent paragraphs.
+
+- convert_content_to_table
+  Convert structured content into a table.
+
+- convert_table_to_text
+  Convert a table into readable text.
+
+- convert_content_to_steps
+  Convert content into an ordered procedure.
+
+These tools must operate within the specified scope.
+
+Generated content must not silently overwrite unrelated content.
+
+==================================================
+3. DOCUMENT CONTENT MANAGEMENT
+==================================================
+
+The initial implementation already includes basic deletion, clearing
+and replacement. Expand it with these additional operations:
+
+- delete_paragraph
+  Delete a particular paragraph.
+
+- delete_section
+  Delete a specified section.
+
+- delete_heading
+  Delete a heading and optionally its associated content, based on
+  explicit scope.
+
+- delete_table
+  Delete a specified table.
+
+- delete_image
+  Delete a specified embedded image.
+
+- delete_object
+  Delete a supported document object.
+
+- delete_matching_content
+  Delete content matching a specified search condition.
+
+- delete_repeated_content
+  Identify and remove duplicate or repeated content.
+
+- delete_empty_paragraphs
+  Remove unnecessary empty paragraphs.
+
+- delete_hyperlinks
+  Remove specified or scoped hyperlinks.
+
+- delete_comments
+  Remove selected comments or all comments within an authorized scope.
+
+- remove_bookmark
+  Remove a specified bookmark.
+
+- replace_paragraph
+  Replace an identified paragraph.
+
+- replace_section
+  Replace the content of a specified section.
+
+- replace_table
+  Replace a table's content while preserving or changing its
+  structure according to the request.
+
+- replace_image
+  Replace an embedded image while preserving its relevant position
+  and supported layout properties.
+
+- replace_placeholder
+  Replace document placeholders such as [Company Name], [Date],
+  [Address] or other specified values.
+
+- move_content
+  Move selected content to another valid document position.
+
+- copy_content
+  Copy selected content to another document position.
+
+- duplicate_content
+  Duplicate selected content.
+
+- merge_paragraphs
+  Merge selected adjacent paragraphs.
+
+- split_paragraph
+  Split a paragraph at a specified position.
+
+- reorder_sections
+  Reorder identified document sections.
+
+- reorder_content_blocks
+  Reorder supported content blocks.
+
+Prevent unintended deletion or movement of unrelated content.
+
+==================================================
+4. ADVANCED DOCUMENT FORMATTING
+==================================================
+
+The initial apply_text_formatting tool must remain available.
+
+Implement dedicated tools for granular formatting operations.
+
+TEXT FORMATTING:
+
+- set_font_family
+- set_font_size
+- set_font_color
+- set_highlight_color
+- set_bold
+- set_italic
+- set_underline
+- set_strikethrough
+- set_subscript
+- set_superscript
+- set_text_alignment
+
+PARAGRAPH FORMATTING:
+
+- set_line_spacing
+- set_paragraph_spacing
+- set_paragraph_indentation
+- set_paragraph_direction
+- set_paragraph_background
+- set_paragraph_borders
+- set_keep_with_next
+- set_page_break_before
+
+LIST FORMATTING:
+
+- set_bullet_style
+- set_numbering_style
+- set_list_level
+- increase_list_indent
+- decrease_list_indent
+
+STYLE MANAGEMENT:
+
+- apply_heading_style
+- apply_paragraph_style
+- apply_document_style
+- create_document_style
+- update_document_style
+- copy_formatting
+- remove_formatting
+- reset_formatting
+- standardize_formatting
+- format_all_headings
+- format_all_paragraphs
+- format_matching_content
+
+Support conditional formatting instructions such as:
+
+"Make all heading 1 elements dark green and 20pt."
+
+"Apply justified alignment to all body paragraphs."
+
+"Highlight all dates in yellow."
+
+"Use the formatting of the first heading for all other headings
+at the same level."
+
+Resolve exact targets and preserve existing formatting that the
+user did not request changing.
+
+Do not recreate or replace the entire document to apply styling.
+
+==================================================
+5. DOCUMENT STRUCTURE AND NAVIGATION
+==================================================
+
+Implement:
+
+- get_document_outline
+  Retrieve the heading hierarchy.
+
+- get_paragraph_details
+  Retrieve paragraph content, ID, position and formatting.
+
+- get_section_details
+  Retrieve a section and its structural information.
+
+- get_table_details
+  Retrieve table dimensions, content and formatting.
+
+- get_image_details
+  Retrieve embedded image information and position.
+
+- get_content_context
+  Retrieve surrounding content for a specified content ID.
+
+- get_content_location
+  Resolve the page, section and position of a content object.
+
+- get_document_statistics
+  Retrieve word count, character count, paragraph count,
+  heading count, table count and image count where available.
+
+- get_document_settings
+  Read document-level settings.
+
+- get_document_styles
+  Retrieve available document styles.
+
+- navigate_to_content
+  Navigate the editor to a specific content object.
+
+- select_content
+  Select content by stable ID or resolved range.
+
+- select_paragraph
+  Select a specific paragraph.
+
+- select_section
+  Select an identified section.
+
+- select_document_range
+  Select a document range.
+
+- update_table_of_contents
+  Refresh the table of contents.
+
+- update_cross_references
+  Refresh supported references to headings, figures, tables
+  and page numbers.
+
+Use actual editor positions and stable content identifiers.
+
+Do not assume that visual pages are independently stored editors.
+Respect the existing logical document structure and pagination model.
+
+==================================================
+6. TABLE MANAGEMENT
+==================================================
+
+Create a dedicated table tool category.
+
+TABLE STRUCTURE:
+
+- create_table
+- delete_table
+- clear_table_contents
+- add_table_row
+- delete_table_row
+- add_table_column
+- delete_table_column
+- merge_table_cells
+- split_table_cells
+- move_table_row
+- move_table_column
+- duplicate_table
+- reorder_table_rows
+- reorder_table_columns
+
+CELL OPERATIONS:
+
+- get_table_cell
+- update_table_cell
+- update_table_range
+- clear_table_cell
+- merge_table_cells
+- split_table_cells
+- set_cell_alignment
+- set_cell_background
+- set_cell_border
+- set_cell_padding
+- set_cell_width
+
+TABLE DATA:
+
+- replace_table_data
+- sort_table
+- filter_table
+- find_table_values
+- remove_duplicate_rows
+- convert_text_to_table
+- convert_table_to_text
+- extract_table_data
+- validate_table_data
+
+TABLE FORMATTING:
+
+- format_table
+- resize_table
+- set_table_width
+- set_table_column_width
+- set_table_row_height
+- set_table_borders
+- set_table_header_row
+- set_table_alternating_rows
+- standardize_tables
+
+Support structured table data and preserve existing cell content
+unless the user explicitly requests a replacement or deletion.
+
+Do not treat a visual table as ordinary paragraph text.
+
+If a requested operation is unsupported by the current table editor,
+report the limitation instead of corrupting the document.
+
+==================================================
+7. IMAGE AND MEDIA MANAGEMENT
+==================================================
+
+Create tools for managing existing embedded media.
+
+- list_document_images
+- get_original_document_image
+- get_image_details
+- replace_image
+- delete_image
+- resize_image
+- crop_image
+- rotate_image
+- align_image
+- set_image_position
+- set_image_wrapping
+- set_image_width
+- set_image_height
+- set_image_caption
+- set_image_alt_text
+- remove_image_alt_text
+- export_document_images
+- find_image_by_description
+- inspect_image_quality
+- check_missing_alt_text
+- standardize_image_layout
+
+Support image references and media IDs.
+
+Do not retrieve or send every image to a vision model automatically.
+
+Use visual inspection only when the task requires it or extracted
+descriptions are insufficient.
+
+When replacing an image, preserve its placement, dimensions,
+wrapping and relevant metadata where appropriate.
+
+Do not silently modify the original source asset when the user
+only requested changing its embedded document instance.
+
+==================================================
+8. PAGE LAYOUT AND PAGINATION
+==================================================
+
+Create tools for managing physical document layout.
+
+PAGE SETTINGS:
+
+- get_page_settings
+- set_page_size
+- set_page_orientation
+- set_page_margins
+- set_page_background
+- set_page_border
+- set_page_columns
+
+PAGE MANAGEMENT:
+
+- add_blank_page
+- delete_page
+- duplicate_page
+- move_content_to_page
+- reorder_pages
+- get_pagination_info
+- get_page_content
+- inspect_page_layout
+- fix_layout_overflow
+
+PAGE BREAKS:
+
+- insert_page_break
+- remove_page_break
+- insert_section_break
+- remove_section_break
+- manage_page_breaks
+
+HEADERS AND FOOTERS:
+
+- get_headers
+- get_footers
+- update_header
+- update_footer
+- delete_header
+- delete_footer
+- set_first_page_different
+- set_section_header_footer
+- configure_linked_headers_footers
+
+PAGE NUMBERING:
+
+- insert_page_numbers
+- configure_page_numbering
+- restart_page_numbering
+- update_page_number_format
+
+ADDITIONAL LAYOUT:
+
+- insert_watermark
+- update_watermark
+- remove_watermark
+- set_section_columns
+- set_page_number_position
+
+CRITICAL REQUIREMENTS:
+
+Use the existing document pagination and section architecture.
+
+The logical document must remain intact when page layout changes.
+
+Distinguish an intentional blank page from an accidental page.
+
+Do not delete intentional page breaks or section breaks as an
+unintended side effect of page cleanup.
+
+Landscape orientation, page margins, dimensions and editor zoom
+must remain synchronized with the actual rendered page.
+
+Header/footer editing must use actual persisted document state.
+
+Do not implement these operations using decorative UI changes
+that have no effect on the saved document.
+
+Implement only page operations supported by the current editor model.
+
+==================================================
+9. LINKS, REFERENCES AND ANNOTATIONS
+==================================================
+
+Implement:
+
+- get_document_links
+- insert_hyperlink
+- update_hyperlink
+- remove_hyperlink
+- find_broken_links
+- create_bookmark
+- navigate_to_bookmark
+- get_bookmarks
+- remove_bookmark
+- insert_cross_reference
+- update_cross_reference
+- insert_footnote
+- update_footnote
+- delete_footnote
+- insert_endnote
+- update_endnote
+- delete_endnote
+- get_document_comments
+- add_document_comment
+- update_document_comment
+- resolve_document_comment
+- delete_document_comment
+- get_document_annotations
+
+Respect the editor's actual support for each annotation or
+reference feature.
+
+Do not fabricate external reference validation when no
+network-enabled verification capability is available.
+
+==================================================
+10. DOCUMENT REVIEW AND QUALITY CHECKS
+==================================================
+
+Implement document review capabilities.
+
+LANGUAGE:
+
+- check_spelling
+- check_grammar
+- check_punctuation
+- check_readability
+- check_sentence_complexity
+- check_language_consistency
+
+CONTENT QUALITY:
+
+- check_repetition
+- find_duplicate_paragraphs
+- find_inconsistencies
+- find_incomplete_sections
+- find_missing_placeholders
+- check_heading_hierarchy
+- check_document_completeness
+- check_document_requirements
+- identify_ambiguous_content
+
+REFERENCES AND STRUCTURE:
+
+- check_references
+- check_citations
+- check_cross_references
+- check_table_numbering
+- check_figure_numbering
+- check_document_links
+
+FORMATTING AND ACCESSIBILITY:
+
+- check_formatting_consistency
+- check_font_consistency
+- check_heading_formatting
+- check_table_formatting
+- check_image_alignment
+- check_accessibility
+- check_missing_alt_text
+- check_contrast_when_visual_data_is_available
+
+REVIEW WORKFLOWS:
+
+- create_review_report
+- suggest_document_improvements
+- apply_review_suggestions
+- compare_document_versions
+- summarize_document_changes
+
+Review operations must be non-destructive by default.
+
+When the user asks to fix errors, resolve the specific issues
+and apply supported changes.
+
+Provide locations and relevant context for review findings.
+
+Do not fabricate factual correctness or citations without
+supporting source evidence.
+
+==================================================
+11. DOCUMENT EXPORT AND IMPORT
+==================================================
+
+Implement document-specific import and export capabilities
+using existing supported conversion libraries or services.
+
+- import_document
+- export_document
+- export_as_pdf
+- export_as_docx
+- export_as_txt
+- export_as_html
+- export_document_images
+- generate_print_version
+- inspect_export_result
+- verify_export_content
+- verify_export_layout
+- compare_export_with_editor
+
+Support only formats that can be produced reliably by the current
+application.
+
+Preserve supported:
+- Text and formatting
+- Heading hierarchy
+- Tables
+- Images
+- Hyperlinks
+- Page settings
+- Headers and footers
+- Page numbering
+- Relevant document structure
+
+Do not claim full compatibility when a format cannot preserve
+a feature supported by the editor.
+
+For import, report unsupported or partially preserved features.
+
+Do not implement PDF splitting, merging, annotation or other
+standalone PDF processing features here. Those belong to the
+future PDF workspace registry.
+
+==================================================
+12. DOCUMENT VERSION AND CHANGE MANAGEMENT
+==================================================
+
+Implement these only if the current persistence architecture
+supports reliable history.
+
+- get_document_versions
+- create_document_snapshot
+- compare_document_versions
+- restore_document_version
+- get_document_change_summary
+- get_recent_document_changes
+- undo_document_operation
+- redo_document_operation
+
+Use real version data, editor transactions or saved snapshots.
+
+Do not invent historical versions.
+
+Ensure undo and redo are consistent with the actual document editor.
+
+==================================================
+13. TOOL REGISTRY INTEGRATION
+==================================================
+
+Register every newly implemented capability in the existing
+Document workspace registry.
+
+Maintain the established registry fields:
+
+- Unique tool ID
+- Tool name
+- Short description
+- Category
+- Workspace compatibility
+- Complete JSON input schema
+- Permission requirements
+- Risk classification
+- Implementation reference
+- Availability status
+
+Add clear descriptions and precise JSON schemas.
+
+Use specific typed parameters wherever possible.
+
+Examples of useful parameters:
+- document_id
+- content_id
+- section_id
+- page_number
+- start_position
+- end_position
+- target_content
+- replacement_content
+- table_id
+- row_index
+- column_index
+- image_id
+- formatting_options
+- target_scope
+
+Do not force every tool to accept unnecessary parameters.
+
+Keep schemas provider-independent and use the existing provider
+adapters to translate tool calls into each provider's format.
+
+The model must receive only the relevant full tool definitions
+through the existing dynamic discovery mechanism.
+
+Do not send the entire Document catalog for every request.
+
+Do not change the universal tool registry unless a genuinely
+reusable universal capability is required.
+
+==================================================
+14. TOOL COMPOSITION AND OPERATION EFFICIENCY
+==================================================
+
+The agent should combine tools to complete user requests.
+
+Examples:
+
+REQUEST:
+"Change all headings to dark green, make them 20pt, and ensure
+all body paragraphs are justified."
+
+Expected workflow:
+1. Inspect document structure and headings.
+2. Find relevant body paragraphs.
+3. Apply formatting using efficient batch operations.
+4. Verify the resulting styles.
+
+REQUEST:
+"Remove all images except the architecture diagrams."
+
+Expected workflow:
+1. List embedded images.
+2. Retrieve descriptions or inspect originals when required.
+3. Identify architecture diagrams.
+4. Preserve matching diagrams.
+5. Delete other images using their actual image IDs.
+6. Verify the result.
+
+REQUEST:
+"Create a professional table of contents and fix the heading hierarchy."
+
+Expected workflow:
+1. Inspect heading hierarchy.
+2. Detect missing or inconsistent heading levels.
+3. Apply requested heading corrections.
+4. Generate or update the table of contents.
+5. Verify references and pagination.
+
+REQUEST:
+"Make this document ready for printing."
+
+Expected workflow:
+1. Inspect page layout and content.
+2. Check margins, orientation and page overflow.
+3. Review headers, footers and page numbers.
+4. Inspect image and table layout.
+5. Fix only necessary issues.
+6. Generate a print-ready export.
+7. Verify the export.
+
+Use one shared task scratchpad for multi-step operations.
+Do not repeat completed operations.
+
+==================================================
+15. EXECUTION, PERMISSIONS AND VERIFICATION
+==================================================
+
+Every tool must use the shared execution layer.
+
+Required behavior:
+
+- Validate input against the actual JSON schema.
+- Resolve the exact target document and content object.
+- Check current workspace and user authorization.
+- Use real editor commands.
+- Use undoable transactions where possible.
+- Support cancellation.
+- Prevent duplicate execution.
+- Handle editor-unmounted and document-switching cases.
+- Verify the actual editor state.
+- Verify persistence before claiming success.
+- Return structured execution results.
+
+RISK RULES:
+
+Read-only operations:
+May execute without modification confirmation.
+
+Modifying operations:
+Must resolve the target and scope before execution.
+
+Destructive operations:
+Must use the established confirmation and undo policies.
+
+For ambiguous requests, ask one concise clarification instead
+of guessing a destructive scope.
+
+For large bulk modifications, provide a preview or clear scope
+summary when necessary.
+
+Do not report success merely because an editor action was dispatched.
+
+==================================================
+16. SYSTEM PROMPT INTEGRATION
+==================================================
+
+Update the existing shared system prompt to recognize the expanded
+Document workspace capabilities.
+
+Do not list every tool name and schema inside the permanent prompt.
+
+The system prompt must explain:
+
+- Document workspace tools are discovered dynamically.
+- Document operations must use actual structured editor capabilities.
+- Exact document, page, section and content scope must be resolved.
+- Reading and modifying are distinct actions.
+- Source image inspection is conditional, not automatic.
+- Bulk operations should be efficient.
+- Multi-step tasks should use the task scratchpad.
+- Destructive modifications require appropriate authorization.
+- All modifications must be verified and persisted.
+- Unsupported operations must be reported honestly.
+
+Preserve the existing universal-agent and workspace-aware tool
+discovery instructions.
+
+Do not create a separate Document AI agent.
+
+==================================================
+17. IMPLEMENTATION PRIORITY
+==================================================
+
+Implement the remaining tools in stages.
+
+STAGE A — CORE EDITING COMPLETION
+- Structured content creation
+- Content transformations
+- Content movement and organization
+- Advanced formatting
+- Navigation and document statistics
+
+STAGE B — STRUCTURED OBJECTS
+- Table management
+- Image and media management
+- Hyperlinks, bookmarks and references
+- Comments and annotations
+
+STAGE C — PAGE AND LAYOUT
+- Page settings
+- Page breaks
+- Section breaks
+- Headers and footers
+- Page numbering
+- Watermarks
+- Pagination inspection and fixes
+
+STAGE D — REVIEW AND QUALITY
+- Proofreading
+- Consistency checks
+- Structure validation
+- Accessibility checks
+- Review reports
+- Version comparison
+
+STAGE E — FILE OUTPUT
+- Import and export
+- PDF and DOCX export
+- Export validation
+- Version and change management where supported
+
+Do not stop after merely adding the tool names.
+Implement the actual functionality and integrate every completed
+tool into the registry.
+
+==================================================
+18. TESTING AND ACCEPTANCE CRITERIA
+==================================================
+
+Add unit and integration tests for each supported operation.
+
+Verify:
+
+1. Every registered tool has a real working implementation.
+2. Every tool has an accurate JSON schema.
+3. Dynamic discovery finds the correct Document tools.
+4. Only requested schemas are loaded.
+5. Existing initial tools still work.
+6. Structured insertions preserve document structure.
+7. Deletions affect only the intended target.
+8. Replacements affect only the intended scope.
+9. Batch formatting works across multiple elements.
+10. Table operations preserve valid cell structure.
+11. Image operations target the correct embedded objects.
+12. Page layout updates remain synchronized with pagination.
+13. Headers and footers persist correctly.
+14. Undo and redo work where supported.
+15. Exported files preserve supported formatting and structure.
+16. Editor switching does not execute operations on the wrong file.
+17. Duplicate tool calls do not duplicate changes.
+18. Failed persistence is never reported as successful.
+19. Task continuation uses saved scratchpad state.
+20. No unsupported tool is advertised as implemented.
+
+Run:
+- TypeScript checks.
+- Unit tests.
+- Integration tests.
+- Production build.
+- Real browser editor-operation tests.
+
+Do not treat a successful build or mocked tool test as proof
+that real editor operations work.
+
+==================================================
+19. IMPLEMENTATION REPORT
+==================================================
+
+After implementation, report:
+
+1. Existing tools reused.
+2. New tools implemented.
+3. Tools already supported by the editor.
+4. Tools requiring new editor capabilities.
+5. Tools not implemented and the exact reason.
+6. Registry and schema changes.
+7. System prompt changes.
+8. Tests and build results.
+9. Any remaining limitations.
+
+IMPORTANT FINAL REQUIREMENT:
+
+The objective is a fully functional Document workspace tool ecosystem,
+not simply a large catalog of advertised tool names.
+
+Prioritize reliable execution, accurate target resolution, structured
+document integrity, persistence and verification over the number
+of registered tools.
+
+</USER_REQUEST>
+<ADDITIONAL_METADATA>
+The current local time is: 2026-11-09T10:49:26+05:30.
+
+The user's current state is as follows:
+Active Document: d:\Projects\Programming\Open Source\Docium\src\app\globals.css (LANGUAGE_UNSPECIFIED)
+Cursor is on line: 255
+Other open documents:
+- d:\Projects\Programming\Open Source\Docium\LICENSE (LANGUAGE_UNSPECIFIED)
+- d:\Projects\Programming\Open Source\Docium\README.md (LANGUAGE_UNSPECIFIED)
+- d:\Projects\Programming\Open Source\Docium\docker-compose.yml (LANGUAGE_UNSPECIFIED)
+- d:\Projects\Programming\Open Source\Docium\Dockerfile (LANGUAGE_UNSPECIFIED)
+- d:\Projects\Programming\Open Source\Docium\.env.example (LANGUAGE_UNSPECIFIED)
+</ADDITIONAL_METADATA>

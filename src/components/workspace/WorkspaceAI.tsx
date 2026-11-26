@@ -285,21 +285,38 @@ export function WorkspaceAI({
       return;
     }
 
-    // Resolve manual @attach source references
-    const attachMatches = Array.from(promptText.matchAll(/@attach\s*\(\s*["']?([^"')]+)["']?\s*\)/gi));
-    const explicitFilenames = attachMatches.map((m) => m[1].trim());
+    // Resolve @file mentions and manual @attach source references strictly from current workspace
+    const mentionMatches = Array.from(
+      promptText.matchAll(
+        /@(?:attach\s*\(\s*["']?([^"')]+)["']?\s*\)|([a-zA-Z0-9_\-\.\s]+\.[a-zA-Z0-9]{2,5})|([^@\s,;:!?()]+\.[a-zA-Z0-9]{2,5}))/gi
+      )
+    );
+    const explicitFilenames = mentionMatches.map((m) => (m[1] || m[2] || m[3] || '').trim()).filter(Boolean);
 
+    // Resolve explicit sources strictly from current workspace sources
     const resolvedExplicitSources: ResearchSource[] = [];
     for (const name of explicitFilenames) {
-      const match =
-        activeSources.find((s: ResearchSource) => s.title.toLowerCase() === name.toLowerCase()) ||
-        workspaceSources.find((s: ResearchSource) => s.title.toLowerCase() === name.toLowerCase());
+      const match = activeSources.find(
+        (s: ResearchSource) =>
+          s.title.toLowerCase() === name.toLowerCase() ||
+          s.id.toLowerCase() === name.toLowerCase() ||
+          s.title.toLowerCase().startsWith(name.toLowerCase())
+      );
       if (match && !resolvedExplicitSources.some((r) => r.id === match.id)) {
         resolvedExplicitSources.push(match);
       }
     }
 
-    // Combined sources prioritizing explicit @attach references
+    for (const att of currentAttachments) {
+      const match = activeSources.find(
+        (s: ResearchSource) => s.id === att.id || s.title.toLowerCase() === att.name.toLowerCase()
+      );
+      if (match && !resolvedExplicitSources.some((r) => r.id === match.id)) {
+        resolvedExplicitSources.push(match);
+      }
+    }
+
+    // Combined sources prioritizing explicit references, STRICTLY from current workspace
     const prioritizedSources = [...resolvedExplicitSources];
     for (const s of activeSources) {
       if (!prioritizedSources.some((c) => c.id === s.id)) {
@@ -319,44 +336,25 @@ export function WorkspaceAI({
         }
       : undefined;
 
-    const workspaceFiles: WorkspaceFileRecord[] = [
-      ...documents.map((d) => ({
-        id: d.id,
-        title: d.title,
-        type: 'doc' as const,
-        format: 'doc',
-        content: d.content,
-        updatedAt: d.updatedAt,
-        wordCount: d.wordCount,
-      })),
-      ...sheets.map((s) => ({
-        id: s.id,
-        title: s.title,
-        type: 'sheet' as const,
-        format: 'sheet',
-        updatedAt: s.updatedAt,
-      })),
-      ...slides.map((sl) => ({
-        id: sl.id,
-        title: sl.title,
-        type: 'slide' as const,
-        format: 'slide',
-        updatedAt: sl.updatedAt,
-      })),
-      ...pdfs.map((p) => ({
-        id: p.id,
-        title: p.title,
-        type: 'pdf' as const,
-        format: 'pdf',
-        updatedAt: p.updatedAt,
-      })),
-    ];
-
     const currentActiveDoc =
       documents.find((d) => d.id === workspaceId) ||
       sheets.find((s) => s.id === workspaceId) ||
       slides.find((sl) => sl.id === workspaceId) ||
       pdfs.find((p) => p.id === workspaceId);
+
+    // Strict Architectural Workspace Isolation: Pass ONLY files belonging to the active workspace
+    const workspaceFiles: WorkspaceFileRecord[] = currentActiveDoc
+      ? [
+          {
+            id: currentActiveDoc.id,
+            title: currentActiveDoc.title,
+            type: ((currentActiveDoc as any).type || documentFormat || 'doc') as 'doc' | 'sheet' | 'slide' | 'pdf',
+            content: 'content' in currentActiveDoc ? (currentActiveDoc as { content?: string }).content : undefined,
+            updatedAt: currentActiveDoc.updatedAt ? String(currentActiveDoc.updatedAt) : undefined,
+            wordCount: (currentActiveDoc as any).wordCount,
+          },
+        ]
+      : [];
 
     let activeDocument: ActiveDocumentContext | undefined = undefined;
     const isEditorRegistered = editorRegistry.hasActiveEditor(workspaceId);
@@ -440,9 +438,47 @@ export function WorkspaceAI({
               (e) => (evt.id && e.id === evt.id) || (evt.stepId && e.stepId === evt.stepId)
             );
             if (existingIdx !== -1) {
-              accumulatedEvents[existingIdx] = evt;
+              const prev = accumulatedEvents[existingIdx];
+              const mergedUpdates = [...(prev.updates || [])];
+              if (evt.updates && evt.updates.length > 0) {
+                for (const u of evt.updates) {
+                  const uIdx = mergedUpdates.findIndex((x) => x.id === u.id);
+                  if (uIdx !== -1) {
+                    mergedUpdates[uIdx] = u;
+                  } else {
+                    mergedUpdates.push(u);
+                  }
+                }
+                mergedUpdates.sort((a, b) => a.sequence - b.sequence);
+              }
+              accumulatedEvents[existingIdx] = {
+                ...prev,
+                ...evt,
+                updates: mergedUpdates.length > 0 ? mergedUpdates : prev.updates,
+              };
             } else {
               accumulatedEvents.push(evt);
+            }
+          },
+          onWorkingProgressUpdate: (stepId, update) => {
+            const existingIdx = accumulatedEvents.findIndex(
+              (e) => (stepId && e.id === stepId) || (stepId && e.stepId === stepId)
+            );
+            if (existingIdx !== -1) {
+              const prev = accumulatedEvents[existingIdx];
+              const mergedUpdates = [...(prev.updates || [])];
+              const uIdx = mergedUpdates.findIndex((x) => x.id === update.id);
+              if (uIdx !== -1) {
+                mergedUpdates[uIdx] = update;
+              } else {
+                mergedUpdates.push(update);
+              }
+              mergedUpdates.sort((a, b) => a.sequence - b.sequence);
+              accumulatedEvents[existingIdx] = {
+                ...prev,
+                updates: mergedUpdates,
+                safeSummary: update.content || prev.safeSummary,
+              };
             }
           },
           onFinalResponseStarted: () => {
@@ -573,15 +609,21 @@ export function WorkspaceAI({
               accumulatedEvents.some(
                 (e) =>
                   e.status === 'completed' &&
-                  (e.eventType.startsWith('editor_action') ||
-                    e.eventType.startsWith('file_op') ||
-                    e.label.toLowerCase().includes('document') ||
-                    e.label.toLowerCase().includes('file'))
+                  e.eventType !== 'phase'
               );
 
             let contentToCommit = finalContent;
             if (!contentToCommit.trim() && hasCompletedToolsOrActions) {
-              contentToCommit = 'Applied updates directly to the active document.';
+              const isDocEdit = accumulatedEvents.some(
+                (e) =>
+                  e.eventType.startsWith('editor_action') ||
+                  e.eventType.startsWith('file_op') ||
+                  e.label.toLowerCase().includes('document') ||
+                  e.label.toLowerCase().includes('file')
+              );
+              contentToCommit = isDocEdit
+                ? 'Applied updates directly to the active document.'
+                : 'Completed the requested operations.';
             }
 
             const finalEvents = accumulatedEvents.map((e) =>
@@ -695,9 +737,10 @@ export function WorkspaceAI({
     const files = e.target.files;
     if (!files || files.length === 0) return;
 
+    const targetConvId = activeConversation?.id || `conv-${workspaceId}-init`;
     const formData = new FormData();
     formData.append('workspaceId', workspaceId);
-    formData.append('conversationId', activeConversation.id);
+    formData.append('conversationId', targetConvId);
 
     Array.from(files).forEach((f) => formData.append('files', f));
 
@@ -720,14 +763,24 @@ export function WorkspaceAI({
               name: src.title,
               size: src.fileSize || 'File',
               type: src.mimeType || 'document',
+              url: (src as any).extractedImages?.[0]?.url,
             },
           ]);
-          // Ingest into semantic vector index
-          ingestSource(src, workspaceId, embeddingConfig);
+          // Ingest into semantic vector index safely without breaking upload
+          try {
+            ingestSource(src, workspaceId, embeddingConfig);
+          } catch (ingestErr) {
+            console.warn('[DOCIUM] Semantic vector indexing warning (original source preserved):', ingestErr);
+          }
         }
+      } else {
+        const errJson = await res.json().catch(() => ({}));
+        const errorMsg = errJson.error || `Upload failed with status ${res.status}`;
+        alert(`Upload error: ${errorMsg}`);
       }
-    } catch {
-      alert('Failed to upload and index file.');
+    } catch (uploadErr: any) {
+      const message = uploadErr?.message || 'Failed to upload and index file.';
+      alert(`Upload error: ${message}`);
     } finally {
       if (fileInputRef.current) fileInputRef.current.value = '';
     }
@@ -741,7 +794,7 @@ export function WorkspaceAI({
         body: JSON.stringify({
           url,
           workspaceId,
-          conversationId: activeConversation.id,
+          conversationId: activeConversation?.id || `conv-${workspaceId}-init`,
         }),
       });
 
@@ -773,6 +826,26 @@ export function WorkspaceAI({
   const handleRemoveAttachment = (id: string) => {
     setComposerAttachments((prev) => prev.filter((a) => a.id !== id));
   };
+
+  const handleMentionSelect = useCallback(
+    (src: { id: string; title: string; type: string; size?: string }) => {
+      setComposerAttachments((prev) => {
+        if (prev.some((a) => a.id === src.id || a.name.toLowerCase() === src.title.toLowerCase())) {
+          return prev;
+        }
+        return [
+          ...prev,
+          {
+            id: src.id,
+            name: src.title,
+            size: src.size || 'Workspace File',
+            type: src.type || 'document',
+          },
+        ];
+      });
+    },
+    []
+  );
 
   // Conversation Management Handlers
   const handleSelectConversation = (convId: string) => {
@@ -934,7 +1007,7 @@ export function WorkspaceAI({
   return (
     <div
       style={fullWidth ? undefined : { width: `${panelState.preferredWidth}px` }}
-      className={`relative flex flex-col h-full bg-[var(--surface)] shrink-0 transition-[width] duration-75 select-none ${
+      className={`relative flex flex-col h-full bg-[var(--surface)] shrink-0 transition-[width] duration-75 ${
         fullWidth
           ? 'w-full rounded-2xl border border-[var(--border)] shadow-xs overflow-hidden'
           : 'border-l border-[var(--border)]'
@@ -974,6 +1047,14 @@ export function WorkspaceAI({
         onMinimize={() => updateAiPanelState(workspaceId, { mode: 'minimized' })}
       />
 
+      {/* Sources Side Panel (Direct child of root container, flush below ChatHeader) */}
+      <SourcesPanel
+        isOpen={sourcesOpen}
+        onClose={() => setSourcesOpen(false)}
+        sources={activeSources}
+        onRemoveSource={(id) => removeDocumentSource(workspaceId, id)}
+      />
+
       {/* Main Conversation Body */}
       <div className="flex-1 flex flex-col overflow-hidden relative">
         {!hasMessages ? (
@@ -989,14 +1070,6 @@ export function WorkspaceAI({
             messagesEndRef={messagesEndRef}
           />
         )}
-
-        {/* Sources Side Panel */}
-        <SourcesPanel
-          isOpen={sourcesOpen}
-          onClose={() => setSourcesOpen(false)}
-          sources={activeSources}
-          onRemoveSource={(id) => removeDocumentSource(workspaceId, id)}
-        />
       </div>
 
       {/* Bottom Composer */}
@@ -1015,6 +1088,8 @@ export function WorkspaceAI({
         currentProviderId={convProviderId}
         currentModelId={convModelId}
         onSelectModel={handleSelectModel}
+        workspaceId={workspaceId}
+        onMentionSelect={handleMentionSelect}
       />
     </div>
   );

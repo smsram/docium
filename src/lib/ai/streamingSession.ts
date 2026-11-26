@@ -31,6 +31,7 @@ export interface StreamConsumerCallbacks {
   onDelta?: (text: string) => void;
   onReplaceContent?: (text: string) => void;
   onActivity?: (event: AgentActivityEvent) => void;
+  onWorkingProgressUpdate?: (stepId: string, update: { id: string; sequence: number; content: string; timestamp: string }) => void;
   onFinalResponseStarted?: () => void;
   onStepExplanation?: (stepId: string, explanation: string) => void;
   onBlock?: (block: StructuredContentBlock) => void;
@@ -442,11 +443,25 @@ export class StreamingSessionManager {
     if (existingIdx !== -1) {
       // In-place update preserving identity and rich properties
       const prev = nextEvents[existingIdx];
+      const mergedUpdates = [...(prev.updates || [])];
+      if (event.updates && event.updates.length > 0) {
+        for (const u of event.updates) {
+          const uIdx = mergedUpdates.findIndex((x) => x.id === u.id);
+          if (uIdx !== -1) {
+            mergedUpdates[uIdx] = u;
+          } else {
+            mergedUpdates.push(u);
+          }
+        }
+        mergedUpdates.sort((a, b) => a.sequence - b.sequence);
+      }
+
       nextEvents[existingIdx] = {
         ...prev,
         ...event,
         safeSummary: event.safeSummary !== undefined ? event.safeSummary : prev.safeSummary,
         description: event.description !== undefined ? event.description : prev.description,
+        updates: mergedUpdates.length > 0 ? mergedUpdates : prev.updates,
       };
     } else {
       // Bounded array: prevent memory leaks if agent produces hundreds of iterations
@@ -459,6 +474,45 @@ export class StreamingSessionManager {
     session.activityEvents = nextEvents;
     session.lastUpdateTime = Date.now();
     this.updateSnapshot(conversationId);
+  }
+
+  /**
+   * Append or update a structured progress update entry for an existing step.
+   */
+  public addStepProgressUpdate(
+    conversationId: string,
+    requestId: string,
+    stepId: string,
+    update: { id: string; sequence: number; content: string; timestamp: string }
+  ): void {
+    const session = this.sessions.get(conversationId);
+    if (!session || session.requestId !== requestId) return;
+
+    const nextEvents = [...session.activityEvents];
+    const existingIdx = nextEvents.findIndex(
+      (e) => (stepId && e.id === stepId) || (stepId && e.stepId === stepId)
+    );
+
+    if (existingIdx !== -1) {
+      const prev = nextEvents[existingIdx];
+      const mergedUpdates = [...(prev.updates || [])];
+      const uIdx = mergedUpdates.findIndex((x) => x.id === update.id);
+      if (uIdx !== -1) {
+        mergedUpdates[uIdx] = update;
+      } else {
+        mergedUpdates.push(update);
+      }
+      mergedUpdates.sort((a, b) => a.sequence - b.sequence);
+      nextEvents[existingIdx] = {
+        ...prev,
+        updates: mergedUpdates,
+        safeSummary: update.content || prev.safeSummary,
+        description: update.content || prev.description,
+      };
+      session.activityEvents = nextEvents;
+      session.lastUpdateTime = Date.now();
+      this.updateSnapshot(conversationId);
+    }
   }
 
   public setFinalResponseStarted(conversationId: string, requestId: string): void {
@@ -585,6 +639,61 @@ export class StreamingSessionManager {
           } else if (event.type === 'final_response_started') {
             this.setFinalResponseStarted(conversationId, requestId);
             callbacks.onFinalResponseStarted?.();
+          } else if (event.type === 'working_progress_update') {
+            this.addStepProgressUpdate(conversationId, requestId, event.stepId, event.update);
+            callbacks.onWorkingProgressUpdate?.(event.stepId, event.update);
+          } else if (event.type === 'working_step_started') {
+            const stepId = (event as any).stepId || `step-${Date.now()}`;
+            const stepTitle = (event as any).title || (event as any).label || 'Step';
+            const stepSummary = (event as any).summary || (event as any).safeSummary;
+            const newAct: AgentActivityEvent = {
+              id: stepId,
+              stepId,
+              taskId: (event as any).taskId || requestId,
+              conversationId,
+              responseId: (event as any).responseId || requestId,
+              eventType: 'action_step',
+              label: stepTitle,
+              title: stepTitle,
+              status: 'running',
+              safeSummary: stepSummary,
+              description: stepSummary,
+              timestamp: new Date().toISOString(),
+              updates: stepSummary ? [{
+                id: `upd-${Date.now()}`,
+                sequence: 1,
+                content: stepSummary,
+                timestamp: new Date().toISOString(),
+              }] : [],
+            };
+            this.upsertActivityEvent(conversationId, requestId, newAct);
+            callbacks.onActivity?.(newAct);
+          } else if (event.type === 'working_step_completed') {
+            const stepId = (event as any).stepId;
+            const currentSession = this.sessions.get(conversationId);
+            if (currentSession && currentSession.requestId === requestId && stepId) {
+              const step = currentSession.activityEvents.find((e) => e.id === stepId || e.stepId === stepId);
+              if (step) {
+                const summary = (event as any).safeSummary || (event as any).summary || step.safeSummary;
+                const updated: AgentActivityEvent = {
+                  ...step,
+                  status: 'completed',
+                  safeSummary: summary,
+                  description: summary,
+                };
+                this.upsertActivityEvent(conversationId, requestId, updated);
+                callbacks.onActivity?.(updated);
+              }
+            }
+          } else if (event.type === 'task_started') {
+            this.setStatus(conversationId, requestId, 'preparing');
+          } else if (event.type === 'task_completed') {
+            this.setFinalResponseStarted(conversationId, requestId);
+            this.setStatus(conversationId, requestId, 'completed');
+          } else if (event.type === 'task_failed') {
+            this.setStatus(conversationId, requestId, 'failed');
+          } else if (event.type === 'task_cancelled') {
+            this.setStatus(conversationId, requestId, 'cancelled');
           } else if (event.type === 'step_explanation') {
             const currentSession = this.sessions.get(conversationId);
             if (currentSession && currentSession.requestId === requestId) {

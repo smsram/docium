@@ -51,7 +51,7 @@ export function SourcesPanel({
   };
 
   return (
-    <div className="absolute top-12 right-0 bottom-0 z-40 w-80 max-w-[85vw] border-l border-[var(--border)] bg-[var(--surface)] shadow-2xl flex flex-col animate-in slide-in-from-right duration-200 select-none text-xs">
+    <div className="absolute top-12 right-0 bottom-0 z-50 w-full sm:w-80 max-w-full border-l border-[var(--border)] bg-[var(--surface)] shadow-2xl flex flex-col animate-in slide-in-from-right duration-200 select-none text-xs">
       {/* Header */}
       <div className="flex h-11 items-center justify-between border-b border-[var(--border)] px-4 bg-[var(--surface-elevated)] shrink-0">
         <div className="flex items-center gap-2">

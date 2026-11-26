@@ -1,5 +1,6 @@
 import { create } from 'zustand';
-import { persist } from 'zustand/middleware';
+import { persist, createJSONStorage } from 'zustand/middleware';
+import { createSafeWorkspaceStorage } from './storage/safeStorage';
 import {
   DocumentItem,
   SpreadsheetItem,
@@ -227,7 +228,8 @@ interface WorkspaceState {
     prompt: string,
     format?: OutputFormat,
     attachments?: { name: string; size: string; type: string }[],
-    urls?: string[]
+    urls?: string[],
+    initialContent?: string
   ) => string;
 
   // Actions - Notifications
@@ -873,12 +875,16 @@ export const useWorkspaceStore = create<WorkspaceState>()(
         };
 
         if (type === 'doc') {
+          const docContent = templateContent !== undefined
+            ? templateContent
+            : (title ? `<h1>${title}</h1><p></p>` : '<p></p>');
+          const docWordCount = docContent.replace(/<[^>]+>/g, ' ').trim().split(/\s+/).filter(Boolean).length;
           const newDoc: DocumentItem = {
             ...base,
             type: 'doc',
-            content: templateContent || `<h1>${title || 'Untitled Document'}</h1><p>Start writing your thoughts or ask AI to generate an outline...</p>`,
-            wordCount: 12,
-            readingTime: 1,
+            content: docContent,
+            wordCount: docWordCount,
+            readingTime: Math.max(0, Math.ceil(docWordCount / 200)),
             pageSize: 'A4',
             orientation: 'portrait',
             margins: 'normal',
@@ -1118,8 +1124,8 @@ export const useWorkspaceStore = create<WorkspaceState>()(
       addSource: (source) => {
         const newSource: ResearchSource = {
           ...source,
-          id: `src-${Date.now()}`,
-          addedAt: new Date().toISOString(),
+          id: (source as any).id || `src-${Date.now()}`,
+          addedAt: (source as any).addedAt || new Date().toISOString(),
         };
         set((state) => ({ sources: [newSource, ...state.sources] }));
       },
@@ -1601,8 +1607,8 @@ export const useWorkspaceStore = create<WorkspaceState>()(
       addDocumentSource: (documentId, source) => {
         const newSource: ResearchSource = {
           ...source,
-          id: `src-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
-          addedAt: new Date().toISOString(),
+          id: (source as any).id || `src-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
+          addedAt: (source as any).addedAt || new Date().toISOString(),
           isIncludedInContext: source.isIncludedInContext !== false,
           scope: 'document',
         };
@@ -1715,13 +1721,14 @@ export const useWorkspaceStore = create<WorkspaceState>()(
         );
       },
 
-      createFromPrompt: (prompt, format = 'auto', attachments = [], urls = []) => {
+      createFromPrompt: (prompt, format = 'auto', attachments = [], urls = [], initialContent?: string) => {
         let determinedType: 'doc' | 'sheet' | 'slide' = 'doc';
-        const lower = prompt.toLowerCase();
+        const trimmedPrompt = (prompt || '').trim();
+        const lower = trimmedPrompt.toLowerCase();
 
         if (format && format !== 'auto') {
           determinedType = format;
-        } else {
+        } else if (trimmedPrompt) {
           // Automatic detection based on intent and keywords
           const isSheet = /\b(sheet|spreadsheet|table|financial|budget|revenue|p&l|calculation|mrr|arr|accounting|metrics|balance|forecast|numbers|costs|salaries|projection)\b/.test(lower);
           const isSlide = /\b(slide|presentation|pitch deck|deck|keynote|slideshow|pitch|slides)\b/.test(lower);
@@ -1736,8 +1743,14 @@ export const useWorkspaceStore = create<WorkspaceState>()(
 
         const id = `${determinedType}-${Date.now()}`;
         const now = new Date().toISOString();
-        const firstLine = prompt.trim().split('\n')[0].replace(/^[#*-]\s*/, '').trim();
-        const cleanTitle = firstLine.length > 55 ? firstLine.slice(0, 52) + '...' : firstLine || `New ${determinedType.toUpperCase()}`;
+        const defaultTitle =
+          determinedType === 'doc'
+            ? 'Untitled Document'
+            : determinedType === 'sheet'
+            ? 'Untitled Spreadsheet'
+            : 'Untitled Presentation';
+        const firstLine = trimmedPrompt ? trimmedPrompt.split('\n')[0].replace(/^[#*-]\s*/, '').trim() : '';
+        const cleanTitle = firstLine ? (firstLine.length > 55 ? firstLine.slice(0, 52) + '...' : firstLine) : defaultTitle;
 
         const attachedSources: ResearchSource[] = [
           ...attachments.map((a, i) => ({
@@ -1769,19 +1782,29 @@ export const useWorkspaceStore = create<WorkspaceState>()(
           starred: false,
           trashed: false,
           owner: get().userProfile,
-          tags: ['AI Generated'],
-          size: '14 KB',
-          initialPrompt: prompt,
+          tags: trimmedPrompt ? ['AI Generated'] : [determinedType === 'doc' ? 'Document' : determinedType === 'sheet' ? 'Spreadsheet' : 'Presentation'],
+          size: '12 KB',
+          initialPrompt: trimmedPrompt || undefined,
           attachedSources,
         };
 
         if (determinedType === 'doc') {
+          let docContent = '<p></p>';
+          let docWordCount = 0;
+          if (initialContent !== undefined) {
+            docContent = initialContent;
+            docWordCount = initialContent.replace(/<[^>]+>/g, ' ').trim().split(/\s+/).filter(Boolean).length;
+          } else if (trimmedPrompt) {
+            docContent = `<h1>${cleanTitle}</h1><p></p>`;
+            docWordCount = cleanTitle.split(/\s+/).filter(Boolean).length;
+          }
+
           const newDoc: DocumentItem = {
             ...base,
             type: 'doc',
-            content: `<h1>${cleanTitle}</h1><p><em>Generated from prompt: "${prompt}"</em></p><h2>1. Executive Overview</h2><p>This document synthesizes the strategic requirements, operational considerations, and key deliverables for: ${prompt}.</p><h2>2. Scope & Core Objectives</h2><ul><li><strong>Strategic Alignment:</strong> Establish baseline criteria and core success parameters.</li><li><strong>Execution Plan:</strong> Milestone breakdown and resource requirements.</li><li><strong>Quality Verification:</strong> Contingency planning and performance targets.</li></ul><h2>3. Detailed Specifications</h2><p>Collaborate with the AI assistant in the right panel to append sections, generate diagrams, or format data tables.</p>`,
-            wordCount: 110,
-            readingTime: 1,
+            content: docContent,
+            wordCount: docWordCount,
+            readingTime: Math.max(0, Math.ceil(docWordCount / 200)),
             pageSize: 'A4',
             orientation: 'portrait',
             margins: 'normal',
@@ -1859,33 +1882,30 @@ export const useWorkspaceStore = create<WorkspaceState>()(
           set((state) => ({ slides: [newSlide, ...state.slides] }));
         }
 
-        // Initialize dedicated AI conversation for this item
-        const initialAiMessages: AiChatMessage[] = [
-          {
-            id: `msg-${Date.now()}-1`,
-            role: 'user',
-            content: prompt,
-            timestamp: 'Just now',
-            attachments: attachments.map(a => ({ name: a.name, size: a.size, type: a.type })),
-            sources: urls,
-          },
-          {
-            id: `msg-${Date.now()}-2`,
-            role: 'assistant',
-            content: `I've created your **${determinedType === 'doc' ? 'Document' : determinedType === 'sheet' ? 'Spreadsheet' : 'Presentation'}** workspace based on your instructions.\n\nI structured the initial canvas and linked your ${attachedSources.length} attached source${attachedSources.length === 1 ? '' : 's'}. You can ask me to expand any section, recalculate formulas, add slides, or refine phrasing at any time.`,
-            timestamp: 'Just now',
-            suggestedAction: determinedType === 'doc'
-              ? { label: 'Generate Methodology Section', type: 'insert_doc', payload: '### Methodology\nWe adopted a disciplined iterative approach combining qualitative benchmarks with empirical throughput analysis.' }
-              : determinedType === 'sheet'
-              ? { label: 'Calculate Operating Margins', type: 'create_table', payload: 'margins' }
-              : { label: 'Add Roadmap Slide', type: 'create_chart', payload: 'roadmap' },
-          },
-        ];
+        // Initialize dedicated AI conversation for this item (only if prompt was provided)
+        const initialAiMessages: AiChatMessage[] = trimmedPrompt
+          ? [
+              {
+                id: `msg-${Date.now()}-1`,
+                role: 'user',
+                content: trimmedPrompt,
+                timestamp: 'Just now',
+                attachments: attachments.map((a) => ({ name: a.name, size: a.size, type: a.type })),
+                sources: urls,
+              },
+              {
+                id: `msg-${Date.now()}-2`,
+                role: 'assistant',
+                content: `I've created your **${determinedType === 'doc' ? 'Document' : determinedType === 'sheet' ? 'Spreadsheet' : 'Presentation'}** workspace based on your instructions.`,
+                timestamp: 'Just now',
+              },
+            ]
+          : [];
 
         const initialConvId = `conv-${id}-1`;
         const initialConversation: WorkspaceConversation = {
           id: initialConvId,
-          title: cleanTitle || 'Initial Creation Chat',
+          title: cleanTitle || 'Initial Conversation',
           category: 'document',
           documentId: id,
           createdAt: now,
@@ -1975,35 +1995,59 @@ export const useWorkspaceStore = create<WorkspaceState>()(
     }),
     {
       name: 'docium-workspace-storage-v1',
-      partialize: (state) => ({
-        documents: state.documents,
-        sheets: state.sheets,
-        slides: state.slides,
-        pdfs: state.pdfs,
-        projects: state.projects,
-        sources: state.sources,
-        notifications: state.notifications,
-        sidebarCollapsed: state.sidebarCollapsed,
-        theme: state.theme,
-        userProfile: state.userProfile,
-        apiKeys: state.apiKeys,
-        providers: state.providers,
-        defaultProvider: state.defaultProvider,
-        tokensUsedTotal: state.tokensUsedTotal,
-        appearanceSettings: state.appearanceSettings,
-        itemConversations: state.itemConversations,
-        itemSources: state.itemSources,
-        composerDraft: state.composerDraft,
-        documentConversations: state.documentConversations,
-        generalConversations: state.generalConversations,
-        lastSelectedChatId: state.lastSelectedChatId,
-        documentSources: state.documentSources,
-        aiPanelState: state.aiPanelState,
-        embeddingConfig: state.embeddingConfig,
-        specializedModels: state.specializedModels,
-        cloudflareConfig: state.cloudflareConfig,
-        ollamaInstalledModels: state.ollamaInstalledModels,
-      }),
+      storage: createJSONStorage(() => createSafeWorkspaceStorage()),
+      partialize: (state) => {
+        const sanitizeSources = (sourcesList: ResearchSource[] = []) =>
+          sourcesList.map((src) => {
+            if (!src.extractedImages || src.extractedImages.length === 0) return src;
+            return {
+              ...src,
+              extractedImages: src.extractedImages.map((img) => ({
+                id: img.id,
+                caption: img.caption,
+                page: img.page,
+                url: img.url && img.url.startsWith('data:image/') ? `source-storage://${src.id}/${img.id}` : img.url,
+              })),
+            };
+          });
+
+        const sanitizedDocSources: Record<string, ResearchSource[]> = {};
+        if (state.documentSources) {
+          for (const docId of Object.keys(state.documentSources)) {
+            sanitizedDocSources[docId] = sanitizeSources(state.documentSources[docId]);
+          }
+        }
+
+        return {
+          documents: state.documents,
+          sheets: state.sheets,
+          slides: state.slides,
+          pdfs: state.pdfs,
+          projects: state.projects,
+          sources: sanitizeSources(state.sources),
+          notifications: state.notifications,
+          sidebarCollapsed: state.sidebarCollapsed,
+          theme: state.theme,
+          userProfile: state.userProfile,
+          apiKeys: state.apiKeys,
+          providers: state.providers,
+          defaultProvider: state.defaultProvider,
+          tokensUsedTotal: state.tokensUsedTotal,
+          appearanceSettings: state.appearanceSettings,
+          itemConversations: state.itemConversations,
+          itemSources: state.itemSources,
+          composerDraft: state.composerDraft,
+          documentConversations: state.documentConversations,
+          generalConversations: state.generalConversations,
+          lastSelectedChatId: state.lastSelectedChatId,
+          documentSources: sanitizedDocSources,
+          aiPanelState: state.aiPanelState,
+          embeddingConfig: state.embeddingConfig,
+          specializedModels: state.specializedModels,
+          cloudflareConfig: state.cloudflareConfig,
+          ollamaInstalledModels: state.ollamaInstalledModels,
+        };
+      },
       onRehydrateStorage: () => (state) => {
         if (!state) return;
 

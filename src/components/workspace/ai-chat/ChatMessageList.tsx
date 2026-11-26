@@ -80,7 +80,7 @@ const ChatMessageItem = memo(
     if (isUser) {
       return (
         <div className="flex flex-col items-end">
-          <div className="max-w-[85%] rounded-2xl bg-[var(--surface-elevated)] border border-[var(--border)] px-4 py-2.5 text-xs text-[var(--text)] shadow-xs">
+          <div className="max-w-[85%] rounded-2xl bg-[var(--surface-elevated)] border border-[var(--border)] px-4 py-2.5 text-xs text-[var(--text)] shadow-xs select-text">
             {msg.attachments && msg.attachments.length > 0 && (
               <div className="flex flex-wrap gap-1.5 mb-2 pb-2 border-b border-[var(--border-subtle)]">
                 {msg.attachments.map((att, aIdx) => (
@@ -100,7 +100,7 @@ const ChatMessageItem = memo(
                 ))}
               </div>
             )}
-            <div className="whitespace-pre-wrap leading-relaxed">{msg.content}</div>
+            <div className="whitespace-pre-wrap leading-relaxed select-text">{msg.content}</div>
           </div>
         </div>
       );
@@ -108,7 +108,7 @@ const ChatMessageItem = memo(
 
     // Assistant Message
     return (
-      <div className="group relative flex flex-col items-start w-full max-w-full">
+      <div className="group relative flex flex-col items-start w-full max-w-full select-text">
         {/* Assistant Identity Avatar Header */}
         <div className="flex items-center gap-2 mb-2 select-none">
           <AiAvatar size="xs" isGenerating={isGenerating && !isFinalResponseStarted} />
@@ -158,10 +158,10 @@ const ChatMessageItem = memo(
               onCopy={onCopy}
             />
           </div>
-        ) : !isGenerating && !msg.error && (!msg.contentBlocks || msg.contentBlocks.length === 0) ? (
-          <p className="text-xs text-[var(--text-muted)] italic">
-            Response completed without additional text.
-          </p>
+        ) : msg.error ? (
+          <div className="w-full p-2.5 rounded-lg bg-rose-500/10 border border-rose-500/20 text-xs text-rose-600 dark:text-rose-400">
+            {msg.error}
+          </div>
         ) : null}
 
         {/* Citations & Source References */}
@@ -623,14 +623,45 @@ export function ChatMessageList({
     };
   }, []);
 
+  // Global Ctrl+A / Cmd+A within conversation container
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) return;
+
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && (e.key === 'a' || e.key === 'A')) {
+        const target = e.target as HTMLElement | null;
+        if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)) {
+          return;
+        }
+        if (container.contains(target) || document.activeElement === container) {
+          e.preventDefault();
+          const selection = window.getSelection();
+          if (selection) {
+            selection.removeAllRanges();
+            const range = document.createRange();
+            range.selectNodeContents(container);
+            selection.addRange(range);
+          }
+        }
+      }
+    };
+
+    container.addEventListener('keydown', handleKeyDown);
+    return () => {
+      container.removeEventListener('keydown', handleKeyDown);
+    };
+  }, []);
+
   return (
     <div
       ref={containerRef}
+      tabIndex={0}
       onScroll={handleScroll}
       onWheel={handleWheel}
       onTouchStart={handleTouchStart}
       onTouchMove={handleTouchMove}
-      className="flex-1 overflow-y-auto px-4 py-3 space-y-5 relative"
+      className="flex-1 overflow-y-auto px-4 py-3 space-y-5 relative select-text outline-none focus-visible:ring-0"
     >
       {/* 1. Historical Messages: Referentially stable, never re-renders during streaming */}
       <HistoricalMessagesList

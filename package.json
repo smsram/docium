@@ -9,6 +9,7 @@
     "lint": "eslint"
   },
   "dependencies": {
+    "@napi-rs/canvas": "^1.1.0",
     "@tiptap/extension-color": "^3.32.2",
     "@tiptap/extension-highlight": "^3.32.2",
     "@tiptap/extension-image": "^3.32.2",
@@ -33,6 +34,7 @@
     "react": "19.3.0",
     "react-dom": "19.3.0",
     "tailwind-merge": "^3.7.0",
+    "unpdf": "^1.9.1",
     "zustand": "^5.0.16"
   },
   "devDependencies": {

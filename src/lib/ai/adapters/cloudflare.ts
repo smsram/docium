@@ -13,6 +13,8 @@ import {
   AdapterOptions,
   NormalizedStreamChunk,
 } from './base';
+import crypto from 'crypto';
+import { validateImageBuffer } from '../pdf/pdfService';
 
 export interface CloudflareResolvedEndpoint {
   url: string;
@@ -297,6 +299,230 @@ export function parseSSELine(line: string): { isDone: boolean; json: any | null 
   }
 }
 
+/**
+ * Normalizes and validates a base64 data URI for Cloudflare Workers AI multimodal payloads.
+ * Strips line breaks, verifies mime type, and ensures non-empty base64 content.
+ */
+export function normalizeBase64DataUrl(rawUrl: string): string | null {
+  if (!rawUrl || typeof rawUrl !== 'string') return null;
+  const trimmed = rawUrl.trim();
+  const match = trimmed.match(/^data:(image\/[a-zA-Z0-9.+_-]+);base64,([\s\S]+)$/);
+  if (!match) return null;
+  const mime = match[1].toLowerCase();
+  const rawBase64 = match[2].replace(/\s+/g, '');
+  if (rawBase64.length < 8) return null;
+  return `data:${mime};base64,${rawBase64}`;
+}
+
+export interface SingleImageDiagnostic {
+  imageIndex: number;
+  mimeType: string;
+  width?: number;
+  height?: number;
+  byteLength: number;
+  base64Length: number;
+  hash: string;
+  signatureValid: boolean;
+  decodable: boolean;
+  error?: string;
+}
+
+export interface CloudflarePayloadValidation {
+  valid: boolean;
+  error?: string;
+  imageCount: number;
+  imageMimeTypes: string[];
+  allBase64DataUris: boolean;
+  totalBase64Length: number;
+  imageDiagnostics?: SingleImageDiagnostic[];
+}
+
+/**
+ * Pre-flight validation of the complete outgoing payload before sending to Cloudflare Workers AI.
+ * Ensures strict compliance with Cloudflare multimodal schemas and prevents HTTP 400 rejection.
+ * Performs full pixel decode checks on all image buffers to eliminate truncated/corrupted images.
+ */
+export async function validateCloudflarePayload(payload: Record<string, unknown>): Promise<CloudflarePayloadValidation> {
+  const messages = payload.messages;
+  if (!Array.isArray(messages)) {
+    return {
+      valid: false,
+      error: 'Payload messages must be an array',
+      imageCount: 0,
+      imageMimeTypes: [],
+      allBase64DataUris: false,
+      totalBase64Length: 0,
+      imageDiagnostics: [],
+    };
+  }
+
+  let imageCount = 0;
+  const imageMimeTypes: string[] = [];
+  const imageDiagnostics: SingleImageDiagnostic[] = [];
+  let allBase64DataUris = true;
+  let totalBase64Length = 0;
+
+  const SUPPORTED_MIMES = new Set([
+    'image/png',
+    'image/jpeg',
+    'image/jpg',
+    'image/webp',
+    'image/gif',
+    'image/svg+xml',
+  ]);
+
+  for (let mIdx = 0; mIdx < messages.length; mIdx++) {
+    const msg = messages[mIdx] as Record<string, unknown> | undefined;
+    if (!msg || typeof msg !== 'object') continue;
+
+    if (Array.isArray(msg.content)) {
+      for (let cIdx = 0; cIdx < msg.content.length; cIdx++) {
+        const part = msg.content[cIdx] as Record<string, unknown> | undefined;
+        if (!part || typeof part !== 'object') continue;
+
+        if (part.type === 'image_url') {
+          imageCount++;
+          const imageUrlObj = part.image_url as Record<string, unknown> | undefined;
+          if (!imageUrlObj || typeof imageUrlObj !== 'object') {
+            return {
+              valid: false,
+              error: `Message ${mIdx} content part ${cIdx} has type "image_url" but image_url is not an object.`,
+              imageCount,
+              imageMimeTypes,
+              allBase64DataUris: false,
+              totalBase64Length,
+              imageDiagnostics,
+            };
+          }
+
+          const url = imageUrlObj.url;
+          if (typeof url !== 'string' || !url.trim()) {
+            return {
+              valid: false,
+              error: `Message ${mIdx} content part ${cIdx} has empty or non-string image_url.url.`,
+              imageCount,
+              imageMimeTypes,
+              allBase64DataUris: false,
+              totalBase64Length,
+              imageDiagnostics,
+            };
+          }
+
+          const match = url.match(/^data:(image\/[a-zA-Z0-9.+_-]+);base64,([\s\S]+)$/);
+          if (!match) {
+            allBase64DataUris = false;
+            const preview = url.length > 40 ? url.slice(0, 37) + '...' : url;
+            return {
+              valid: false,
+              error: `Message ${mIdx} content part ${cIdx} has invalid image_url: Cloudflare Workers AI only supports base64 encoded data URIs (found: "${preview}").`,
+              imageCount,
+              imageMimeTypes,
+              allBase64DataUris: false,
+              totalBase64Length,
+              imageDiagnostics,
+            };
+          }
+
+          const mimeType = match[1].toLowerCase();
+          const base64Data = match[2];
+
+          if (!SUPPORTED_MIMES.has(mimeType)) {
+            return {
+              valid: false,
+              error: `Unsupported image MIME type "${mimeType}". Cloudflare Workers AI supports: PNG, JPEG, WEBP, GIF, SVG.`,
+              imageCount,
+              imageMimeTypes,
+              allBase64DataUris,
+              totalBase64Length,
+              imageDiagnostics,
+            };
+          }
+
+          if (base64Data.length < 8) {
+            return {
+              valid: false,
+              error: `Base64 payload for image ${imageCount} is empty or too short (${base64Data.length} chars).`,
+              imageCount,
+              imageMimeTypes,
+              allBase64DataUris,
+              totalBase64Length,
+              imageDiagnostics,
+            };
+          }
+
+          let rawBuffer: Buffer;
+          try {
+            rawBuffer = Buffer.from(base64Data, 'base64');
+          } catch {
+            return {
+              valid: false,
+              error: `Base64 decoding failed for image ${imageCount}.`,
+              imageCount,
+              imageMimeTypes,
+              allBase64DataUris,
+              totalBase64Length,
+              imageDiagnostics,
+            };
+          }
+
+          if (rawBuffer.length === 0) {
+            return {
+              valid: false,
+              error: `Decoded buffer for image ${imageCount} is empty (0 bytes).`,
+              imageCount,
+              imageMimeTypes,
+              allBase64DataUris,
+              totalBase64Length,
+              imageDiagnostics,
+            };
+          }
+
+          // Full decode and signature check using sharp
+          const val = await validateImageBuffer(rawBuffer, mimeType);
+          const hash = val.hash || crypto.createHash('sha256').update(rawBuffer).digest('hex');
+
+          imageDiagnostics.push({
+            imageIndex: imageCount,
+            mimeType,
+            width: val.width,
+            height: val.height,
+            byteLength: rawBuffer.length,
+            base64Length: base64Data.length,
+            hash,
+            signatureValid: val.valid || !val.error?.includes('signature'),
+            decodable: val.valid,
+            error: val.error,
+          });
+
+          if (!val.valid) {
+            return {
+              valid: false,
+              error: `Image ${imageCount} validation failed: ${val.error}`,
+              imageCount,
+              imageMimeTypes,
+              allBase64DataUris,
+              totalBase64Length,
+              imageDiagnostics,
+            };
+          }
+
+          imageMimeTypes.push(mimeType);
+          totalBase64Length += base64Data.length;
+        }
+      }
+    }
+  }
+
+  return {
+    valid: true,
+    imageCount,
+    imageMimeTypes,
+    allBase64DataUris,
+    totalBase64Length,
+    imageDiagnostics,
+  };
+}
+
 export class CloudflareAdapter implements BaseProviderAdapter {
   readonly providerId = 'cloudflare';
 
@@ -320,7 +546,7 @@ export class CloudflareAdapter implements BaseProviderAdapter {
       if (m.role === 'assistant' && m.toolCalls && m.toolCalls.length > 0) {
         return {
           role: 'assistant',
-          content: m.content || '',
+          content: m.content && m.content.trim() ? m.content : null,
           tool_calls: m.toolCalls.map((tc) => ({
             id: tc.id,
             type: 'function',
@@ -332,16 +558,28 @@ export class CloudflareAdapter implements BaseProviderAdapter {
         };
       }
       if (m.images && m.images.length > 0) {
-        return {
-          role: m.role,
-          content: [
-            { type: 'text', text: m.content },
-            ...m.images.map((img) => ({
-              type: 'image_url',
-              image_url: { url: img },
-            })),
-          ],
-        };
+        const validNormalizedImages: string[] = [];
+        for (const rawImg of m.images) {
+          const norm = normalizeBase64DataUrl(rawImg);
+          if (norm) {
+            validNormalizedImages.push(norm);
+          } else {
+            console.warn('[DOCIUM AI Diagnostic] Cloudflare formatMessages: omitting non-base64 image_url candidate');
+          }
+        }
+
+        if (validNormalizedImages.length > 0) {
+          return {
+            role: m.role,
+            content: [
+              { type: 'text', text: m.content },
+              ...validNormalizedImages.map((img) => ({
+                type: 'image_url',
+                image_url: { url: img },
+              })),
+            ],
+          };
+        }
       }
       return {
         role: m.role,
@@ -432,12 +670,46 @@ export class CloudflareAdapter implements BaseProviderAdapter {
       return p;
     };
 
+    const payload = buildPayload(primary.endpointType, true);
+
+    // Section 3: Pre-flight payload validation immediately before outgoing network request
+    const validation = await validateCloudflarePayload(payload);
+    console.log(`[DOCIUM AI Diagnostic] Cloudflare pre-flight validation:`, {
+      requestId: options.requestId || 'none',
+      provider: 'cloudflare',
+      model: cleanModel,
+      endpointType: primary.endpointType,
+      messageCount: Array.isArray(payload.messages) ? (payload.messages as unknown[]).length : 0,
+      imageContentPartCount: validation.imageCount,
+      imageMimeTypes: validation.imageMimeTypes,
+      allBase64DataUris: validation.allBase64DataUris,
+      base64PayloadLength: validation.totalBase64Length,
+      validationResult: validation.valid ? 'PASSED' : 'FAILED',
+    });
+
+    if (validation.imageDiagnostics && validation.imageDiagnostics.length > 0) {
+      for (const diag of validation.imageDiagnostics) {
+        console.log(
+          `[DOCIUM AI Diagnostic] Image Part ${diag.imageIndex}: MIME=${diag.mimeType} | size=${diag.byteLength}B | dimensions=${diag.width}x${diag.height} | hash=${diag.hash.slice(0, 16)} | decodable=${diag.decodable}`
+        );
+      }
+    }
+
+    if (!validation.valid) {
+      console.error(`[DOCIUM AI Diagnostic] Cloudflare payload validation failed: ${validation.error}`);
+      yield {
+        type: 'error',
+        error: `Payload validation failed before sending to Cloudflare: ${validation.error}`,
+      };
+      return;
+    }
+
     let response: Response | null = null;
     let lastNetworkError: string | null = null;
     const maxRetries = 2;
     let attempt = 0;
 
-    // Bounded retries with exponential backoff & jitter for transient network / 429 / 5xx errors
+    // Bounded retries strictly for transient network errors and retryable 429/5xx status codes
     while (attempt <= maxRetries) {
       attempt++;
       try {
@@ -447,12 +719,12 @@ export class CloudflareAdapter implements BaseProviderAdapter {
             'Content-Type': 'application/json',
             Authorization: `Bearer ${options.apiKey}`,
           },
-          body: JSON.stringify(buildPayload(primary.endpointType, true)),
+          body: JSON.stringify(payload),
           signal: options.signal,
         });
 
-        // If primary returned 400 "No route for that URI" or 404, and user did not specify a custom baseUrl, try alternative endpoint
-        if (!res.ok && (res.status === 400 || res.status === 404) && !options.baseUrl) {
+        // 1. Model endpoint fallback: ONLY attempt for 404 Not Found if no custom baseUrl was specified
+        if (!res.ok && res.status === 404 && !options.baseUrl) {
           const altType = primary.endpointType === 'model_run' ? 'chat_completions' : 'model_run';
           const altEndpoint = resolveCloudflareEndpoint({
             accountId,
@@ -461,14 +733,14 @@ export class CloudflareAdapter implements BaseProviderAdapter {
           });
 
           console.log(`[Cloudflare Workers AI] Route check: retrying alternative endpoint (model: ${cleanModel})`);
-
+          const altPayload = buildPayload(altEndpoint.endpointType, true);
           const altRes = await fetch(altEndpoint.url, {
             method: 'POST',
             headers: {
               'Content-Type': 'application/json',
               Authorization: `Bearer ${options.apiKey}`,
             },
-            body: JSON.stringify(buildPayload(altEndpoint.endpointType, true)),
+            body: JSON.stringify(altPayload),
             signal: options.signal,
           });
 
@@ -478,8 +750,8 @@ export class CloudflareAdapter implements BaseProviderAdapter {
           }
         }
 
-        // Check for transient 429 Rate Limit or 5xx Server Errors
-        if (res.status === 429 || (res.status >= 500 && res.status <= 504)) {
+        // 2. Retry only for transient failures (408 Request Timeout, 429 Rate Limit, 500-504 Server Outages)
+        if (res.status === 408 || res.status === 429 || (res.status >= 500 && res.status <= 504)) {
           if (attempt <= maxRetries && !options.signal?.aborted) {
             const retryAfterHeader = res.headers.get('retry-after');
             let delayMs = 600 * Math.pow(2, attempt - 1) + Math.random() * 200;
@@ -495,15 +767,17 @@ export class CloudflareAdapter implements BaseProviderAdapter {
           }
         }
 
+        // 3. Status-Aware: Deterministic responses (200, 400 Bad Request, 401, 403, 422) MUST NOT RETRY or switch routes
         response = res;
         break;
       } catch (err: unknown) {
         if (options.signal?.aborted) {
           return;
         }
+        // Only transient network failures (e.g. DNS failure, connection reset before headers) retry
         if (attempt <= maxRetries) {
           const delayMs = 500 * Math.pow(2, attempt - 1) + Math.random() * 200;
-          console.warn(`[Cloudflare Workers AI] Connection glitch (attempt ${attempt}/${maxRetries + 1}). Retrying in ${Math.round(delayMs)}ms...`);
+          console.warn(`[Cloudflare Workers AI] Network connection glitch (attempt ${attempt}/${maxRetries + 1}). Retrying in ${Math.round(delayMs)}ms...`);
           await new Promise((r) => setTimeout(r, delayMs));
           continue;
         }

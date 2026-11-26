@@ -18,7 +18,6 @@ export interface AiAvatarProps {
 export function AiAvatar({
   size = 'sm',
   className = '',
-  isGenerating = false,
   priority = false,
 }: AiAvatarProps) {
   let dimension = 20;
@@ -36,7 +35,7 @@ export function AiAvatar({
 
   return (
     <div
-      className={`relative shrink-0 rounded-lg overflow-hidden flex items-center justify-center bg-[var(--surface-elevated)] border border-[var(--border-subtle)] shadow-2xs select-none ${className}`}
+      className={`relative shrink-0 flex items-center justify-center select-none ${className}`}
       style={{ width: dimension, height: dimension }}
       title="Docium AI"
     >
@@ -45,15 +44,9 @@ export function AiAvatar({
         alt="Docium AI"
         width={dimension}
         height={dimension}
-        className="object-contain p-0.5"
+        className="w-full h-full object-contain"
         priority={priority}
       />
-      {isGenerating && (
-        <span className="absolute -top-0.5 -right-0.5 flex h-2 w-2 pointer-events-none">
-          <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-[var(--primary)] opacity-75" />
-          <span className="relative inline-flex rounded-full h-2 w-2 bg-[var(--primary)]" />
-        </span>
-      )}
     </div>
   );
 }

@@ -11,6 +11,7 @@ import {
   FileOperationEvent,
   ActiveDocumentContext,
   EditorActionEvent,
+  ProviderId,
 } from '@/lib/types';
 
 export type { WorkspaceFileRecord, FileOperationEvent, ActiveDocumentContext, EditorActionEvent };
@@ -24,22 +25,37 @@ export interface ToolExecutionContext {
   scratchpad: string;
   workspaceFiles?: WorkspaceFileRecord[];
   activeDocument?: ActiveDocumentContext;
+  attachments?: { name: string; size: string; type: string; url?: string; dataUrl?: string }[];
   onUpdateScratchpad?: (newScratchpad: string) => Promise<void> | void;
   onActivityEvent?: (event: { label: string; status: 'running' | 'completed' | 'failed'; safeSummary?: string }) => void;
   onFileOperation?: (op: FileOperationEvent) => Promise<void> | void;
   onEditorAction?: (action: EditorActionEvent) => Promise<void> | void;
+  onLoadTools?: (toolIds: string[]) => void;
   apiKeys?: Record<string, string>;
   searchProvider?: string;
   imageGenProvider?: string;
+  providerId?: ProviderId;
+  modelId?: string;
+  apiKey?: string;
+  baseUrl?: string;
+  accountId?: string;
+  requestId?: string;
+  toolCallId?: string;
 }
 
 export interface ToolResult {
   success: boolean;
+  status?: string;
+  sourceId?: string;
+  mimeType?: string;
   data?: unknown;
   error?: string;
+  errorCategory?: string;
   activitySummary?: string;
   fileOperation?: FileOperationEvent;
   editorAction?: EditorActionEvent;
+  isSecurityViolation?: boolean;
+  statusCode?: string;
   // If the tool generated a chart, image, or citation block:
   structuredBlock?:
     | { type: 'chart'; chart: ChartSpecification }

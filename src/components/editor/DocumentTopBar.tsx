@@ -2,6 +2,7 @@
 
 import React, { useRef } from 'react';
 import Link from 'next/link';
+import Image from 'next/image';
 import {
   FileText,
   ArrowLeft,
@@ -349,7 +350,14 @@ export function DocumentTopBar({
           }`}
           title="Toggle Docium AI Workspace"
         >
-          <Sparkles className="h-3.5 w-3.5" />
+          <Image
+            src="/docium-ai.png"
+            alt="Docium AI"
+            width={14}
+            height={14}
+            className="h-3.5 w-3.5 object-contain shrink-0"
+            unoptimized
+          />
           <span className="hidden sm:inline">Docium AI</span>
         </button>
       </div>

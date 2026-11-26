@@ -3,6 +3,7 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { useWorkspaceStore } from '@/lib/store';
 import { AiChatMessage } from '@/lib/types';
+import { AiAvatar } from './ai-chat/AiAvatar';
 import {
   Sparkles,
   Send,
@@ -156,9 +157,7 @@ export function WorkspaceAiSidecar({
       {/* Header */}
       <div className="flex h-12 items-center justify-between px-4 border-b border-[var(--border)] bg-[var(--surface)]">
         <div className="flex items-center gap-2">
-          <div className="flex h-6 w-6 items-center justify-center rounded-md bg-[var(--primary-light)] text-[var(--primary)]">
-            <Sparkles className="h-3.5 w-3.5" />
-          </div>
+          <AiAvatar size={20} />
           <div>
             <h3 className="text-xs font-semibold text-[var(--text)]">AI Assistant</h3>
             <span className="text-[10px] text-[var(--text-muted)] font-mono leading-none">

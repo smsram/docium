@@ -50,9 +50,12 @@ export interface AdapterOptions {
   apiKey: string;
   baseUrl?: string;
   accountId?: string;
+  requestId?: string;
   temperature?: number;
   maxTokens?: number;
   signal?: AbortSignal;
+  preferredPairIndex?: number;
+  onCredentialActive?: (info: { providerId: ProviderId; index: number; accountId?: string }) => void;
 }
 
 export interface BaseProviderAdapter {

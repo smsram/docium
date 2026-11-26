@@ -3,6 +3,7 @@
 import React, { useEffect, useRef, useState, useCallback } from 'react';
 import { type Editor, EditorContent } from '@tiptap/react';
 import { PageDimensions } from '../utils/pageMetrics';
+import { paginateDocument } from '@/lib/editor/paginationEngine';
 import {
   AlignLeft,
   AlignCenter,
@@ -127,6 +128,49 @@ export function PaginatedCanvas({
 
       const calculated = Math.max(1, hardBreakNodes + 1, overflowPages);
       setPageCount(calculated);
+
+      // Dynamically populate headers, footers, and page numbers on every page break
+      const pageBreakElements = el.querySelectorAll('.docium-page-break');
+      pageBreakElements.forEach((pbEl, idx) => {
+        const prevPageNum = idx + 1;
+        const nextPageNum = idx + 2;
+
+        const footerTextEl = pbEl.querySelector('.docium-page-break-footer-text');
+        const pageNumEl = pbEl.querySelector('.docium-page-break-page-num');
+        const prevFooter = prevPageNum === 1 && differentFirstPage ? firstPageFooterText : footerText;
+
+        if (footerTextEl) {
+          footerTextEl.textContent = resolvePageTokens(prevFooter || '', prevPageNum, calculated);
+        }
+        if (pageNumEl) {
+          pageNumEl.textContent = showPageNumbers ? `Page ${prevPageNum} of ${calculated}` : '';
+        }
+
+        const headerTextEl = pbEl.querySelector('.docium-page-break-header-text');
+        const nextHeader = nextPageNum === 1 && differentFirstPage ? firstPageHeaderText : headerText;
+        if (headerTextEl) {
+          headerTextEl.textContent = resolvePageTokens(nextHeader || '', nextPageNum, calculated);
+        }
+
+        // Attach double-click handlers for seamless in-place editing
+        const footerArea = pbEl.querySelector('.docium-page-break-footer') as HTMLElement | null;
+        if (footerArea && !footerArea.dataset.boundDblClick) {
+          footerArea.dataset.boundDblClick = 'true';
+          footerArea.addEventListener('dblclick', (e) => {
+            e.stopPropagation();
+            startEditingFooter(prevPageNum);
+          });
+        }
+
+        const headerArea = pbEl.querySelector('.docium-page-break-header') as HTMLElement | null;
+        if (headerArea && !headerArea.dataset.boundDblClick) {
+          headerArea.dataset.boundDblClick = 'true';
+          headerArea.addEventListener('dblclick', (e) => {
+            e.stopPropagation();
+            startEditingHeader(nextPageNum);
+          });
+        }
+      });
     };
 
     calculatePages();
@@ -137,7 +181,20 @@ export function PaginatedCanvas({
 
     observer.observe(contentWrapperRef.current);
     return () => observer.disconnect();
-  }, [editor, editor?.state.doc, pageContentHeightPx, heightPx, widthPx]);
+  }, [
+    editor,
+    editor?.state.doc,
+    pageContentHeightPx,
+    heightPx,
+    widthPx,
+    differentFirstPage,
+    firstPageHeaderText,
+    firstPageFooterText,
+    headerText,
+    footerText,
+    showPageNumbers,
+    resolvePageTokens,
+  ]);
 
   // Activate Header editing
   const startEditingHeader = (pageNumber: number) => {
@@ -576,54 +633,33 @@ export function PaginatedCanvas({
         >
           {isPaginatedView ? (
             // ==================== PAGINATED MULTI-SHEET VIEW ====================
-            <div className="flex flex-col items-center space-y-8">
-              {Array.from({ length: pageCount }).map((_, pageIndex) => {
-                const pageNumber = pageIndex + 1;
+            <div
+              id="docium-paginated-sheet"
+              style={{
+                width: `${widthPx}px`,
+                minHeight: `${heightPx}px`,
+              }}
+              className="page-sheet relative bg-[var(--surface)] border border-[var(--border)] rounded-sm shadow-md flex flex-col justify-between transition-all"
+            >
+              {/* Header Region (Page 1 Top) */}
+              {renderHeaderArea(1)}
 
-                return (
-                  <div
-                    key={pageNumber}
-                    id={`docium-page-${pageNumber}`}
-                    style={{
-                      width: `${widthPx}px`,
-                      minHeight: `${heightPx}px`,
-                    }}
-                    className="page-sheet relative bg-[var(--surface)] border border-[var(--border)] rounded-sm shadow-md flex flex-col justify-between overflow-hidden transition-all"
-                  >
-                    {/* Header Region */}
-                    {renderHeaderArea(pageNumber)}
+              {/* Printable Content Region */}
+              <div
+                ref={contentWrapperRef}
+                style={{
+                  paddingLeft: `${marginsPx.left}px`,
+                  paddingRight: `${marginsPx.right}px`,
+                  minHeight: `${pageContentHeightPx}px`,
+                  ...columnStyle,
+                }}
+                className="flex-1 text-[var(--text)] text-sm leading-relaxed"
+              >
+                <EditorContent editor={editor} />
+              </div>
 
-                    {/* Printable Content Region */}
-                    {pageIndex === 0 ? (
-                      <div
-                        ref={contentWrapperRef}
-                        style={{
-                          paddingLeft: `${marginsPx.left}px`,
-                          paddingRight: `${marginsPx.right}px`,
-                          minHeight: `${pageContentHeightPx}px`,
-                          ...columnStyle,
-                        }}
-                        className="flex-1 text-[var(--text)] text-sm leading-relaxed"
-                      >
-                        <EditorContent editor={editor} />
-                      </div>
-                    ) : (
-                      // Subsequent physical pages (rendered seamlessly without artificial text)
-                      <div
-                        style={{
-                          paddingLeft: `${marginsPx.left}px`,
-                          paddingRight: `${marginsPx.right}px`,
-                          minHeight: `${pageContentHeightPx}px`,
-                        }}
-                        className="flex-1 select-none pointer-events-none"
-                      />
-                    )}
-
-                    {/* Footer Region */}
-                    {renderFooterArea(pageNumber)}
-                  </div>
-                );
-              })}
+              {/* Footer Region (Page N Bottom) */}
+              {renderFooterArea(pageCount)}
             </div>
           ) : (
             // ==================== CONTINUOUS WEB VIEW ====================
@@ -673,6 +709,35 @@ export function PaginatedCanvas({
           color: var(--text-muted);
           opacity: 0.3;
           font-family: monospace;
+        }
+
+        /* Physical Page Break styling */
+        .docium-page-break {
+          user-select: none;
+          margin-top: 1rem;
+          margin-bottom: 1rem;
+          width: 100%;
+        }
+        .docium-page-break-desk-gap {
+          height: 2rem;
+          background-color: var(--background);
+          border-top: 1px solid var(--border);
+          border-bottom: 1px solid var(--border);
+          box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.05);
+        }
+        @media print {
+          .docium-page-break {
+            page-break-before: always;
+            break-before: page;
+            height: 0;
+            margin: 0;
+            overflow: hidden;
+          }
+          .docium-page-break-desk-gap,
+          .docium-page-break-footer,
+          .docium-page-break-header {
+            display: none !important;
+          }
         }
       `}</style>
     </div>

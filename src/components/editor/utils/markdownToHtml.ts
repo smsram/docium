@@ -4,7 +4,7 @@
  * Correctly parses headings, paragraphs, lists, tables, callouts, blockquotes, and formatting marks.
  */
 
-function escapeHtml(str: string): string {
+export function escapeHtml(str: string): string {
   return str
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
@@ -76,6 +76,11 @@ export function convertMarkdownToDocumentHtml(mdOrHtml: string): string {
   const htmlParts: string[] = [];
   let i = 0;
 
+  // Track estimated height of content on current page to ensure multi-program and multi-section
+  // content automatically flows across physical A4 pages (~880px printable height)
+  const MAX_PAGE_CONTENT_PX = 860;
+  let currentPageHeightPx = 0;
+
   while (i < lines.length) {
     const line = lines[i];
     const trimmed = line.trim();
@@ -86,24 +91,95 @@ export function convertMarkdownToDocumentHtml(mdOrHtml: string): string {
       continue;
     }
 
-    // 2. Headings (# H1 to ###### H6)
+    // 2. Fenced Code Block (```lang or ~~~lang)
+    const codeFenceMatch = line.match(/^([ \t]*)(`{3,}|~{3,})([a-zA-Z0-9_+-]*)/);
+    if (codeFenceMatch) {
+      const fenceMarker = codeFenceMatch[2][0]; // '`' or '~'
+      const fenceLength = codeFenceMatch[2].length;
+      const language = codeFenceMatch[3].trim() || 'python';
+      i++; // Skip opening fence line
+
+      const codeLines: string[] = [];
+      const closeFencePattern = new RegExp(`^[ \\t]*${fenceMarker === '`' ? '`' : '~'}{${fenceLength},}[ \\t]*$`);
+
+      while (i < lines.length) {
+        if (closeFencePattern.test(lines[i])) {
+          i++; // Skip closing fence line
+          break;
+        }
+        // Strictly preserve exact indentation, blank lines, and whitespace!
+        codeLines.push(lines[i]);
+        i++;
+      }
+
+      // If existing content on this page + code block exceeds page capacity, start a new page
+      const estimatedCodeHeight = codeLines.length * 21 + 36;
+      if (currentPageHeightPx > 0 && currentPageHeightPx + estimatedCodeHeight > MAX_PAGE_CONTENT_PX) {
+        htmlParts.push('<div data-type="page-break" class="docium-page-break"></div>');
+        currentPageHeightPx = 0;
+      }
+
+      // Check if code block itself is longer than page capacity (~38 lines):
+      // Cleanly split at line breaks across physical page boundaries
+      const MAX_LINES_PER_CODE_PAGE = 36;
+      if (codeLines.length > MAX_LINES_PER_CODE_PAGE + 6) {
+        let lineOffset = 0;
+        while (lineOffset < codeLines.length) {
+          const chunk = codeLines.slice(lineOffset, lineOffset + MAX_LINES_PER_CODE_PAGE);
+          lineOffset += MAX_LINES_PER_CODE_PAGE;
+
+          const escapedChunk = escapeHtml(chunk.join('\n'));
+          const langClass = language ? ` class="language-${escapeHtml(language)}"` : '';
+          htmlParts.push(`<pre><code${langClass}>${escapedChunk}</code></pre>`);
+
+          if (lineOffset < codeLines.length) {
+            htmlParts.push('<div data-type="page-break" class="docium-page-break"></div>');
+            currentPageHeightPx = 0;
+          } else {
+            currentPageHeightPx = chunk.length * 21 + 36;
+          }
+        }
+      } else {
+        const escapedCode = escapeHtml(codeLines.join('\n'));
+        const langClass = language ? ` class="language-${escapeHtml(language)}"` : '';
+        htmlParts.push(`<pre><code${langClass}>${escapedCode}</code></pre>`);
+        currentPageHeightPx += estimatedCodeHeight;
+      }
+      continue;
+    }
+
+    // 3. Headings (# H1 to ###### H6)
     const headingMatch = trimmed.match(/^(#{1,6})\s+(.+)$/);
     if (headingMatch) {
       const level = headingMatch[1].length;
       const text = formatInline(escapeHtml(headingMatch[2].trim()));
+      const headingHeight = level === 1 ? 50 : level === 2 ? 40 : 30;
+
+      // When a major heading (H1) arrives and page already has substantial content (> 350px),
+      // or if adding this heading exceeds page budget, start on next physical page!
+      if (
+        currentPageHeightPx > 0 &&
+        ((level === 1 && currentPageHeightPx > 350) || currentPageHeightPx + headingHeight > MAX_PAGE_CONTENT_PX)
+      ) {
+        htmlParts.push('<div data-type="page-break" class="docium-page-break"></div>');
+        currentPageHeightPx = 0;
+      }
+
       htmlParts.push(`<h${level}>${text}</h${level}>`);
+      currentPageHeightPx += headingHeight;
       i++;
       continue;
     }
 
-    // 3. Page break or horizontal rule (--- or ***)
+    // 4. Page break or horizontal rule (--- or ***)
     if (/^(\-{3,}|\*{3,}|_{3,})$/.test(trimmed)) {
       htmlParts.push('<div data-type="page-break" class="docium-page-break"></div>');
+      currentPageHeightPx = 0;
       i++;
       continue;
     }
 
-    // 4. Blockquote (> quote)
+    // 5. Blockquote (> quote)
     if (trimmed.startsWith('>')) {
       const quoteLines: string[] = [];
       while (i < lines.length && lines[i].trim().startsWith('>')) {
@@ -112,6 +188,7 @@ export function convertMarkdownToDocumentHtml(mdOrHtml: string): string {
       }
       const quoteContent = quoteLines.map((l) => formatInline(escapeHtml(l))).join(' ');
       htmlParts.push(`<blockquote><p>${quoteContent}</p></blockquote>`);
+      currentPageHeightPx += quoteLines.length * 24 + 20;
       continue;
     }
 
@@ -188,6 +265,8 @@ export function convertMarkdownToDocumentHtml(mdOrHtml: string): string {
       i < lines.length &&
       lines[i].trim() &&
       !/^#{1,6}\s+/.test(lines[i].trim()) &&
+      !lines[i].trim().startsWith('```') &&
+      !lines[i].trim().startsWith('~~~') &&
       !lines[i].trim().startsWith('>') &&
       !lines[i].trim().startsWith('|') &&
       !/^[-*]\s+/.test(lines[i].trim()) &&
@@ -201,6 +280,7 @@ export function convertMarkdownToDocumentHtml(mdOrHtml: string): string {
     if (pLines.length > 0) {
       const pText = formatInline(escapeHtml(pLines.join(' ')));
       htmlParts.push(`<p>${pText}</p>`);
+      currentPageHeightPx += Math.max(24, Math.ceil(pText.length / 80) * 22 + 10);
     }
   }
 

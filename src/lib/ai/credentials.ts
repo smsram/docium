@@ -153,6 +153,27 @@ export function isCredentialError(statusOrError?: number | unknown, errorMessage
   const lower = text.toLowerCase();
 
   // 1. Explicit non-credential errors that MUST NEVER trigger rotation:
+  // Deterministic 400 Bad Request, payload schema errors, invalid image input must NEVER rotate
+  if (
+    status === 400 ||
+    lower.includes('400 bad request') ||
+    lower.includes('property image_url') ||
+    lower.includes('only supports base64') ||
+    lower.includes('invalid request') ||
+    lower.includes('payload validation') ||
+    lower.includes('unsupported image') ||
+    lower.includes('unsupported media type') ||
+    lower.includes('failed to load image') ||
+    lower.includes('image file is truncated') ||
+    lower.includes('premature end of jpeg') ||
+    lower.includes('image decoding') ||
+    lower.includes('image decode') ||
+    lower.includes('corrupt image') ||
+    lower.includes('not processed')
+  ) {
+    return false;
+  }
+
   // Network connection failures & timeouts
   if (
     lower.includes('fetch failed') ||
@@ -313,6 +334,88 @@ export function parseRetryAfterSeconds(headerValue?: string | null): number {
     return diff > 0 ? diff : 60;
   }
   return 60;
+}
+
+/**
+ * Checks whether a Cloudflare Account ID + API Token pair is in cooldown.
+ * Checks both account-level quota cooldown and specific pair cooldown.
+ */
+export function isCloudflarePairInCooldown(pair: CloudflarePair): boolean {
+  if (!pair || !pair.accountId) return false;
+  // Check account-level cooldown
+  if (isKeyInCooldown('cloudflare', `account:${pair.accountId}`)) {
+    return true;
+  }
+  // Check specific pair cooldown
+  return isKeyInCooldown('cloudflare', `${pair.accountId}:${pair.apiToken}`);
+}
+
+/**
+ * Sets cooldown for a Cloudflare pair, and optionally marks the entire Account ID in cooldown
+ * if the rate limit is account-level (Workers AI quota exhausted).
+ */
+export function setCloudflarePairCooldown(
+  pair: CloudflarePair,
+  durationSeconds = 60,
+  isAccountLevel = false
+): void {
+  if (!pair) return;
+  setKeyCooldown('cloudflare', `${pair.accountId}:${pair.apiToken}`, durationSeconds);
+  if (isAccountLevel && pair.accountId) {
+    setKeyCooldown('cloudflare', `account:${pair.accountId}`, durationSeconds);
+  }
+}
+
+/**
+ * Clear cooldown map (for test fixtures and session resets).
+ */
+export function clearCredentialCooldowns(): void {
+  keyCooldownMap.clear();
+}
+
+/**
+ * Sorts Cloudflare pairs to prioritize available pairs (not in cooldown).
+ * If a preferredPairIndex is provided and that pair is not in cooldown, it is placed first.
+ */
+export function orderCloudflarePairsByAvailability(
+  pairs: CloudflarePair[],
+  preferredIndex?: number
+): CloudflarePair[] {
+  if (pairs.length <= 1) return [...pairs];
+
+  const active: CloudflarePair[] = [];
+  const inCooldown: CloudflarePair[] = [];
+
+  let preferredPair: CloudflarePair | undefined;
+  if (
+    typeof preferredIndex === 'number' &&
+    preferredIndex >= 0 &&
+    preferredIndex < pairs.length
+  ) {
+    const candidate = pairs[preferredIndex];
+    if (!isCloudflarePairInCooldown(candidate)) {
+      preferredPair = candidate;
+    }
+  }
+
+  for (let i = 0; i < pairs.length; i++) {
+    const p = pairs[i];
+    if (preferredPair && p.accountId === preferredPair.accountId && p.apiToken === preferredPair.apiToken) {
+      continue; // Will be placed at the very front
+    }
+    if (isCloudflarePairInCooldown(p)) {
+      inCooldown.push(p);
+    } else {
+      active.push(p);
+    }
+  }
+
+  const result: CloudflarePair[] = [];
+  if (preferredPair) {
+    result.push(preferredPair);
+  }
+  result.push(...active, ...inCooldown);
+  return result;
 }
 
 /**

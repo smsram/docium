@@ -249,7 +249,7 @@ export function DocumentEditor({ documentId, showBackToHome = false }: DocumentE
       Superscript,
       ShapeNode,
     ],
-    content: doc?.contentJson || doc?.content || '<p>Start typing...</p>',
+    content: doc?.contentJson || (doc?.content !== undefined ? doc.content : '<p></p>'),
     immediatelyRender: false,
     editorProps: {
       attributes: {

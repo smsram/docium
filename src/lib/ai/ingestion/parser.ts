@@ -1,3 +1,5 @@
+import { extractPdfDocument } from '../pdf/pdfService';
+
 /**
  * Multimodal Document Parser
  * Parses diverse file types:
@@ -46,21 +48,8 @@ export interface ParsedDocumentResult {
   imageDescription?: string;
 }
 
-/**
- * Fast deterministic string hash for incremental caching.
- */
-export function computeContentHash(content: string): string {
-  let h1 = 0xdeadbeef ^ 0;
-  let h2 = 0x41c6ce57 ^ 0;
-  for (let i = 0; i < content.length; i++) {
-    const ch = content.charCodeAt(i);
-    h1 = Math.imul(h1 ^ ch, 2654435761);
-    h2 = Math.imul(h2 ^ ch, 1597334677);
-  }
-  h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
-  h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
-  return (4294967296 * (2097151 & h2) + (h1 >>> 0)).toString(36);
-}
+import { computeContentHash } from './hash';
+export { computeContentHash };
 
 /**
  * Parses CSV or tabular text into structured Markdown table representation.
@@ -297,65 +286,52 @@ export async function parseUploadedFile(
 
   // 6. PDF DOCUMENTS
   if (ext === 'pdf') {
-    const buffer = await file.arrayBuffer();
-    const raw = new TextDecoder('utf-8', { fatal: false }).decode(buffer);
+    const arrayBuf = await file.arrayBuffer();
+    const nodeBuf = Buffer.from(arrayBuf);
+    const pdfAnalysis = await extractPdfDocument(nodeBuf, filename);
 
-    // Extract textual stream segments
+    if (pdfAnalysis.success && pdfAnalysis.totalPages > 0) {
+      const hash = computeContentHash(pdfAnalysis.fullText);
+      const snippet = `PDF document: ${pdfAnalysis.totalPages} pages, ${
+        pdfAnalysis.hasNativeText ? 'native text extracted' : 'scanned/visual document'
+      } (${fileSize})`;
+
+      return {
+        title: pdfAnalysis.title || filename,
+        type: 'pdf',
+        extractedText: pdfAnalysis.fullText,
+        snippet,
+        pageCount: pdfAnalysis.totalPages,
+        mimeType: 'application/pdf',
+        fileSize,
+        contentHash: hash,
+        embeddedImages: [],
+      };
+    }
+
+    // Fallback: raw stream text extraction if parser had an issue
+    const raw = new TextDecoder('utf-8', { fatal: false }).decode(arrayBuf);
     const textMatches = raw.match(/\(([^)]+)\)\s*Tj/g) || [];
     const extractedWords = textMatches
       .map((m) => m.replace(/^[(\s]+|[)\s*Tj]+$/g, ''))
       .filter((w) => w.length > 1)
       .join(' ');
 
-    const embeddedImages: DocumentImageAsset[] = [];
-
-    // Detect embedded image objects in PDF stream
-    if (raw.includes('/Subtype /Image') || raw.includes('/XObject') || raw.includes('/DCTDecode')) {
-      embeddedImages.push({
-        id: `${sourceIdPrefix}-pdf-img-1`,
-        sourceId: sourceIdPrefix,
-        page: 1,
-        position: 1,
-        dimensions: { width: 800, height: 600 },
-        mimeType: 'image/jpeg',
-        url: 'data:image/jpeg;base64,/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAP//////////////////////////////////////////////////////////////////////////////////////wgALCAABAAEBAREA/8QAFBABAAAAAAAAAAAAAAAAAAAAAP/aAAgBAQABPxA=',
-        caption: `Figure 1: Embedded Diagram / Chart in ${filename} (Page 1)`,
-      });
-    }
-
-    let pdfText = '';
-    if (extractedWords && extractedWords.length > 80) {
-      pdfText = `--- Page 1 ---\n# ${filename}\n${extractedWords}\n`;
-      if (embeddedImages.length > 0) {
-        pdfText += `\n[Embedded Visual Asset: ${embeddedImages[0].id} - ${embeddedImages[0].caption}]\n`;
-      }
-    } else {
-      pdfText = `--- Page 1 ---\n# Document Overview: ${filename}\n`;
-      pdfText += `This structured PDF reference contains architectural documentation, section hierarchy, and reference data.\n`;
-      pdfText += `## Section 1: Introduction\nCore operational principles and multimodal agent integration.\n`;
-      if (embeddedImages.length > 0) {
-        pdfText += `\n[Embedded Visual Asset: ${embeddedImages[0].id} - ${embeddedImages[0].caption}]\n`;
-      }
-      pdfText += `\n--- Page 2 ---\n## Section 2: Detailed Specifications & Tables\n`;
-      pdfText += `| Parameter | Value | Target |\n`;
-      pdfText += `| --- | --- | --- |\n`;
-      pdfText += `| Latency | < 12ms | Sub-15ms |\n`;
-      pdfText += `| Precision | 99.4% | > 99.0% |\n`;
-      pdfText += `\n--- Page 3 ---\n## Section 3: Summary & Appendices\nConclusions and verified source citations.\n`;
-    }
-
-    const hash = computeContentHash(pdfText);
+    const fallbackText = extractedWords
+      ? `--- Page 1 ---\n# ${filename}\n${extractedWords}\n`
+      : `--- Page 1 ---\n# ${filename}\n[Scanned or binary PDF document]\n`;
+    const hash = computeContentHash(fallbackText);
 
     return {
       title: filename,
       type: 'pdf',
-      extractedText: pdfText,
-      snippet: `PDF document: 3 pages, structured tables and embedded visuals (${fileSize})`,
-      pageCount: 3,
+      extractedText: fallbackText,
+      snippet: `PDF document: 1 page (${fileSize})`,
+      pageCount: 1,
       mimeType: 'application/pdf',
       fileSize,
       contentHash: hash,
-      embeddedImages,
+      embeddedImages: [],
     };
   }
 
@@ -400,15 +376,30 @@ export async function parseUploadedFile(
     file.type.startsWith('image/')
   ) {
     const buffer = await file.arrayBuffer();
-    // Convert arrayBuffer to base64 data URL
-    let binary = '';
-    const bytes = new Uint8Array(buffer);
-    const len = Math.min(bytes.byteLength, 1024 * 1024); // max 1MB inline
-    for (let i = 0; i < len; i++) {
-      binary += String.fromCharCode(bytes[i]);
+    // Convert arrayBuffer to base64 data URL cleanly without arbitrary 1MB truncation
+    let base64 = '';
+    if (typeof Buffer !== 'undefined') {
+      base64 = Buffer.from(buffer).toString('base64');
+    } else {
+      const bytes = new Uint8Array(buffer);
+      const chunkSize = 8192;
+      let binary = '';
+      for (let i = 0; i < bytes.length; i += chunkSize) {
+        binary += String.fromCharCode.apply(null, Array.from(bytes.subarray(i, i + chunkSize)));
+      }
+      base64 = btoa(binary);
     }
-    const base64 = typeof btoa !== 'undefined' ? btoa(binary) : Buffer.from(binary, 'binary').toString('base64');
-    const mime = file.type || (ext === 'png' ? 'image/png' : ext === 'webp' ? 'image/webp' : 'image/jpeg');
+    const cleanExt = ext.toLowerCase();
+    const mime =
+      file.type && file.type !== 'application/octet-stream'
+        ? file.type
+        : cleanExt === 'png'
+        ? 'image/png'
+        : cleanExt === 'webp'
+        ? 'image/webp'
+        : cleanExt === 'svg'
+        ? 'image/svg+xml'
+        : 'image/jpeg';
     const dataUrl = `data:${mime};base64,${base64}`;
 
     const ocrText = `Extracted text from ${filename}: [Header: Diagram Overview, Values: Stage A -> Stage B -> Stage C, Legend: Blue = Active, Gray = Inactive]`;

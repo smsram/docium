@@ -11,6 +11,7 @@ import {
   NormalizedStreamChunk,
 } from './base';
 import { ProviderId } from '@/lib/types';
+import { normalizeBase64DataUrl } from './cloudflare';
 
 export class OpenAICompatibleAdapter implements BaseProviderAdapter {
   constructor(public readonly providerId: ProviderId, private readonly defaultEndpoint: string) {}
@@ -21,6 +22,64 @@ export class OpenAICompatibleAdapter implements BaseProviderAdapter {
 
   supportsVision(): boolean {
     return true;
+  }
+
+  formatMessages(messages: NormalizedMessage[]) {
+    return messages.map((m) => {
+      if (m.role === 'tool') {
+        return {
+          role: 'tool',
+          content: m.content,
+          tool_call_id: m.toolCallId || 'call_0',
+        };
+      }
+      if (m.role === 'assistant' && m.toolCalls && m.toolCalls.length > 0) {
+        return {
+          role: 'assistant',
+          content: m.content && m.content.trim() ? m.content : null,
+          tool_calls: m.toolCalls.map((tc) => ({
+            id: tc.id,
+            type: 'function',
+            function: {
+              name: tc.name,
+              arguments: typeof tc.arguments === 'string' ? tc.arguments : JSON.stringify(tc.arguments || {}),
+            },
+          })),
+        };
+      }
+      if (m.images && m.images.length > 0) {
+        const validImages = m.images
+          .map((img) => {
+            if (typeof img !== 'string') return null;
+            const trimmed = img.trim();
+            if (trimmed.startsWith('data:image/')) {
+              return normalizeBase64DataUrl(trimmed);
+            }
+            if (/^https?:\/\//i.test(trimmed)) {
+              return trimmed;
+            }
+            return null;
+          })
+          .filter((img): img is string => Boolean(img));
+
+        if (validImages.length > 0) {
+          return {
+            role: m.role,
+            content: [
+              { type: 'text', text: m.content },
+              ...validImages.map((img) => ({
+                type: 'image_url',
+                image_url: { url: img },
+              })),
+            ],
+          };
+        }
+      }
+      return {
+        role: m.role,
+        content: m.content,
+      };
+    });
   }
 
   async *generateStream(
@@ -48,45 +107,7 @@ export class OpenAICompatibleAdapter implements BaseProviderAdapter {
     }
 
     // Transform messages
-    const formattedMessages = messages.map((m) => {
-      if (m.role === 'tool') {
-        return {
-          role: 'tool',
-          content: m.content,
-          tool_call_id: m.toolCallId || 'call_0',
-        };
-      }
-      if (m.role === 'assistant' && m.toolCalls && m.toolCalls.length > 0) {
-        return {
-          role: 'assistant',
-          content: m.content || '',
-          tool_calls: m.toolCalls.map((tc) => ({
-            id: tc.id,
-            type: 'function',
-            function: {
-              name: tc.name,
-              arguments: JSON.stringify(tc.arguments || {}),
-            },
-          })),
-        };
-      }
-      if (m.images && m.images.length > 0) {
-        return {
-          role: m.role,
-          content: [
-            { type: 'text', text: m.content },
-            ...m.images.map((img) => ({
-              type: 'image_url',
-              image_url: { url: img },
-            })),
-          ],
-        };
-      }
-      return {
-        role: m.role,
-        content: m.content,
-      };
-    });
+    const formattedMessages = this.formatMessages(messages);
 
     const bodyPayload: Record<string, unknown> = {
       model: options.model,

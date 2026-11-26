@@ -49,6 +49,8 @@ interface ChatComposerProps {
   currentProviderId?: ProviderId;
   currentModelId?: string;
   onSelectModel?: (providerId: ProviderId, modelId: string) => void;
+  workspaceId?: string;
+  onMentionSelect?: (source: { id: string; title: string; type: string; size?: string }) => void;
 }
 
 export function ChatComposer({
@@ -66,6 +68,8 @@ export function ChatComposer({
   currentProviderId,
   currentModelId,
   onSelectModel,
+  workspaceId,
+  onMentionSelect,
 }: ChatComposerProps) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const toolsButtonRef = useRef<HTMLButtonElement>(null);
@@ -81,9 +85,9 @@ export function ChatComposer({
   const [autocompleteQuery, setAutocompleteQuery] = useState('');
   const [highlightedIndex, setHighlightedIndex] = useState(0);
 
-  const { sources, documents, sheets, slides, pdfs } = useWorkspaceStore();
+  const { getDocumentSources, documents, sheets, slides, pdfs, sources } = useWorkspaceStore();
 
-  // Aggregate candidate sources for manual @attach mentions
+  // Aggregate candidate sources exclusively belonging to the active workspace
   const candidateSources = useMemo(() => {
     const list: Array<{ id: string; title: string; type: string; size?: string }> = [];
     const seen = new Set<string>();
@@ -96,46 +100,51 @@ export function ChatComposer({
       }
     }
 
-    // 2. Sources in the store
-    for (const s of sources) {
+    // 2. Strict Workspace Isolation: Sources belonging exclusively to the currently active workspace
+    const currentWorkspaceSources = workspaceId ? getDocumentSources(workspaceId) : [];
+    for (const s of currentWorkspaceSources) {
       if (!seen.has(s.title.toLowerCase())) {
         seen.add(s.title.toLowerCase());
         list.push({ id: s.id, title: s.title, type: s.type, size: s.fileSize });
       }
     }
 
-    // 3. Workspace documents, sheets, presentations, pdfs
-    for (const d of documents) {
-      const name = `${d.title}.docx`;
-      if (!seen.has(name.toLowerCase())) {
-        seen.add(name.toLowerCase());
-        list.push({ id: d.id, title: name, type: 'docx', size: d.size });
+    // Also check store sources explicitly tagged with this workspaceId
+    if (workspaceId) {
+      for (const s of sources) {
+        if (s.workspaceId === workspaceId && !seen.has(s.title.toLowerCase())) {
+          seen.add(s.title.toLowerCase());
+          list.push({ id: s.id, title: s.title, type: s.type, size: s.fileSize });
+        }
       }
     }
-    for (const s of sheets) {
-      const name = `${s.title}.xlsx`;
-      if (!seen.has(name.toLowerCase())) {
-        seen.add(name.toLowerCase());
-        list.push({ id: s.id, title: name, type: 'xlsx' });
+
+    // 3. Active workspace document itself (only if ID matches active workspace)
+    if (workspaceId) {
+      const activeDoc = documents.find((d) => d.id === workspaceId);
+      if (activeDoc && !seen.has(`${activeDoc.title}.docx`.toLowerCase())) {
+        seen.add(`${activeDoc.title}.docx`.toLowerCase());
+        list.push({ id: activeDoc.id, title: `${activeDoc.title}.docx`, type: 'docx', size: activeDoc.size });
       }
-    }
-    for (const sl of slides) {
-      const name = `${sl.title}.pptx`;
-      if (!seen.has(name.toLowerCase())) {
-        seen.add(name.toLowerCase());
-        list.push({ id: sl.id, title: name, type: 'pptx' });
+      const activeSheet = sheets.find((s) => s.id === workspaceId);
+      if (activeSheet && !seen.has(`${activeSheet.title}.xlsx`.toLowerCase())) {
+        seen.add(`${activeSheet.title}.xlsx`.toLowerCase());
+        list.push({ id: activeSheet.id, title: `${activeSheet.title}.xlsx`, type: 'xlsx' });
       }
-    }
-    for (const p of pdfs) {
-      const name = `${p.title}.pdf`;
-      if (!seen.has(name.toLowerCase())) {
-        seen.add(name.toLowerCase());
-        list.push({ id: p.id, title: name, type: 'pdf', size: p.size });
+      const activeSlide = slides.find((sl) => sl.id === workspaceId);
+      if (activeSlide && !seen.has(`${activeSlide.title}.pptx`.toLowerCase())) {
+        seen.add(`${activeSlide.title}.pptx`.toLowerCase());
+        list.push({ id: activeSlide.id, title: `${activeSlide.title}.pptx`, type: 'pptx' });
+      }
+      const activePdf = pdfs.find((p) => p.id === workspaceId);
+      if (activePdf && !seen.has(`${activePdf.title}.pdf`.toLowerCase())) {
+        seen.add(`${activePdf.title}.pdf`.toLowerCase());
+        list.push({ id: activePdf.id, title: `${activePdf.title}.pdf`, type: 'pdf', size: activePdf.size });
       }
     }
 
     return list;
-  }, [attachments, sources, documents, sheets, slides, pdfs]);
+  }, [attachments, workspaceId, getDocumentSources, sources, documents, sheets, slides, pdfs]);
 
   // Filter sources matching typed @attach query
   const filteredSources = useMemo(() => {
@@ -172,20 +181,27 @@ export function ChatComposer({
   };
 
   const selectSource = useCallback(
-    (src: { id: string; title: string }) => {
+    (src: { id: string; title: string; type: string; size?: string }) => {
       const val = input;
       const cursor = textareaRef.current ? textareaRef.current.selectionStart : val.length;
       const textBefore = val.slice(0, cursor);
       const textAfter = val.slice(cursor);
 
-      // Replace the matched @query with @attach("filename")
+      // Check if user specifically typed @attach or just @
+      const isAttachSyntax = /@attach\s*\(?"?([a-zA-Z0-9_\-\.\s]*)$/i.test(textBefore);
+      const replacementToken = isAttachSyntax ? `@attach("${src.title}") ` : `@${src.title} `;
+
       const replacedBefore = textBefore.replace(
         /(?:@attach\s*\(?"?|@)([a-zA-Z0-9_\-\.\s]*)$/i,
-        `@attach("${src.title}") `
+        replacementToken
       );
       const newVal = replacedBefore + textAfter;
       onChangeInput(newVal);
       setAutocompleteOpen(false);
+
+      if (onMentionSelect) {
+        onMentionSelect(src);
+      }
 
       setTimeout(() => {
         if (textareaRef.current) {
@@ -195,7 +211,7 @@ export function ChatComposer({
         }
       }, 10);
     },
-    [input, onChangeInput]
+    [input, onChangeInput, onMentionSelect]
   );
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -284,7 +300,7 @@ export function ChatComposer({
           <div className="flex items-center justify-between px-2 py-1 text-[10px] font-semibold uppercase tracking-wider text-[var(--text-muted)] border-b border-[var(--border-subtle)] mb-1">
             <span className="flex items-center gap-1">
               <AtSign className="h-3 w-3 text-[var(--primary)]" />
-              <span>Reference Source (@attach)</span>
+              <span>Reference Workspace File (@)</span>
             </span>
             <span className="text-[9px] opacity-70">↑↓ to navigate, Enter to select</span>
           </div>
@@ -330,7 +346,7 @@ export function ChatComposer({
           value={input}
           onChange={(e) => handleInputChange(e.target.value)}
           onKeyDown={handleKeyDown}
-          placeholder="Ask Docium AI anything or type @attach to reference a source..."
+          placeholder="Ask Docium AI anything or type @ to reference a workspace file..."
           rows={1}
           className="w-full resize-none bg-transparent px-3.5 pt-2.5 pb-1 text-xs text-[var(--text)] placeholder:text-[var(--text-muted)] outline-none leading-relaxed"
         />

@@ -218,6 +218,21 @@ export async function POST(req: NextRequest) {
       baseUrl: body.searchConfig?.baseUrl,
     };
 
+    // Strict Backend Workspace Boundary Authorization:
+    // Drop any files or sources from external workspaces before passing to orchestrator
+    const safeWorkspaceFiles = (workspaceFiles as any[]).filter(
+      (wf) => !wf.id || wf.id === workspaceId || (activeDocument && wf.id === activeDocument.id)
+    );
+    const safeAttachedSources = (attachedSources as any[]).filter(
+      (s) => !s.workspaceId || s.workspaceId === workspaceId
+    );
+    const safeExplicitSourceIds = (explicitSourceIds as string[]).filter(
+      (sid) =>
+        safeAttachedSources.some((s) => s.id === sid) ||
+        safeWorkspaceFiles.some((wf) => wf.id === sid) ||
+        (attachments && (attachments as any[]).some((a) => a.id === sid))
+    );
+
     const params: AgentRunParams = {
       requestId,
       workspaceId,
@@ -225,8 +240,8 @@ export async function POST(req: NextRequest) {
       conversationId: conversationId || `conv-${workspaceId}-1`,
       userPrompt,
       attachments,
-      attachedSources,
-      explicitSourceIds,
+      attachedSources: safeAttachedSources,
+      explicitSourceIds: safeExplicitSourceIds,
       conversationHistory,
       scratchpad,
       providerId,
@@ -236,7 +251,7 @@ export async function POST(req: NextRequest) {
       accountId: resolvedAccountId,
       searchConfig: resolvedSearchConfig,
       enabledTools,
-      workspaceFiles,
+      workspaceFiles: safeWorkspaceFiles,
       activeDocument,
       timeZone,
       signal: abortController.signal,

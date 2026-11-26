@@ -11,7 +11,7 @@ import {
   registerChunks,
   registerDocumentImages,
 } from './embeddings';
-import { computeContentHash } from './ingestion/parser';
+import { computeContentHash } from './ingestion/hash';
 import { processImagesBatch } from './images/imageUnderstanding';
 
 export interface IngestionProgress {

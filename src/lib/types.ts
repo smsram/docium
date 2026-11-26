@@ -354,6 +354,13 @@ export interface GeneratedImageMetadata {
 
 export type AgentStepStatus = 'pending' | 'running' | 'completed' | 'failed';
 
+export interface AgentActivityStepUpdate {
+  id: string;
+  sequence: number;
+  content: string;
+  timestamp: string;
+}
+
 export interface AgentActivityEvent {
   id: string;
   stepId?: string;
@@ -371,6 +378,9 @@ export interface AgentActivityEvent {
   order?: number;
   durationMs?: number;
   timestamp: string;
+  eventId?: string;
+  eventSequence?: number;
+  updates?: AgentActivityStepUpdate[];
 }
 
 export type StructuredContentBlock =
@@ -631,12 +641,23 @@ export interface EditorActionEvent {
 export interface EditorActionResult {
   success: boolean;
   error?: string;
+  status?: string;
+  statusCode?: string;
   documentId?: string;
   action?: string;
   actionId?: string;
+  pageNumber?: number;
   contentChanged?: boolean;
+  changed?: boolean;
   insertedCharacters?: number;
   persisted?: boolean;
   summary?: string;
+  verification?: {
+    pageExists?: boolean;
+    bodyContentEmpty?: boolean;
+    headersPreserved?: boolean;
+    footersPreserved?: boolean;
+    pageStructurePreserved?: boolean;
+  };
 }
 

@@ -1,0 +1,14 @@
+%PDF-1.4
+Program 1: Implement Perceptron learning algorithm in Python.
+```python
+import numpy as np
+class Perceptron:
+    pass
+```
+Program 2: Implement Backpropagation algorithm in Python.
+```python
+import numpy as np
+class Backprop:
+    pass
+```
+%%EOF

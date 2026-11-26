@@ -73,27 +73,34 @@ const StepRow = memo(function StepRow({
   const isRunning = evt.status === 'running';
   const isFailed = evt.status === 'failed';
   const stepContent = evt.safeSummary || evt.description;
-  const hasContent = Boolean(stepContent && stepContent.trim() !== '');
+  const updates = evt.updates || [];
+  const hasUpdates = updates.length > 0;
+  const hasContent = hasUpdates || Boolean(stepContent && stepContent.trim() !== '');
 
   const handleToggle = useCallback(() => {
+    // If the user is currently selecting/highlighting text, do not toggle disclosure
+    const selection = typeof window !== 'undefined' ? window.getSelection() : null;
+    if (selection && selection.toString().trim().length > 0) {
+      return;
+    }
     if (hasContent) {
       onToggle(stepKey);
     }
   }, [hasContent, onToggle, stepKey]);
 
   return (
-    <div className="relative text-[11px] leading-relaxed" role="listitem">
+    <div className="relative text-[11px] leading-relaxed select-text" role="listitem">
       {/* Step header row: Plain Title + Subtle Disclosure Arrow */}
       <button
         type="button"
         onClick={handleToggle}
-        className={`group/step inline-flex items-center gap-1.5 py-0.5 px-1 -ml-1 rounded transition-colors duration-100 text-left ${
+        className={`group/step inline-flex items-center gap-1.5 py-0.5 px-1 -ml-1 rounded transition-colors duration-100 text-left select-text ${
           hasContent ? 'cursor-pointer hover:bg-[var(--accent)]/30' : 'cursor-default'
         }`}
         aria-expanded={hasContent ? isExpanded : undefined}
       >
         <span
-          className={`transition-colors ${
+          className={`transition-colors select-text ${
             isRunning
               ? 'font-medium text-[var(--text)]'
               : isFailed
@@ -106,7 +113,7 @@ const StepRow = memo(function StepRow({
 
         {hasContent && (
           <ChevronDown
-            className={`h-3 w-3 text-[var(--text-muted)] opacity-60 group-hover/step:opacity-100 transition-transform duration-150 ${
+            className={`h-3 w-3 text-[var(--text-muted)] opacity-60 group-hover/step:opacity-100 transition-transform duration-150 select-none ${
               isExpanded ? 'rotate-0' : '-rotate-90'
             }`}
             aria-hidden="true"
@@ -116,22 +123,46 @@ const StepRow = memo(function StepRow({
 
       {/* Indented Step Content — Conversational Assistant Progress */}
       {isExpanded && hasContent && (
-        <div className="ml-3 pl-1 mt-0.5 mb-1 text-[11px] text-[var(--text-muted)] leading-relaxed animate-in fade-in duration-150">
-          <p className="whitespace-pre-wrap break-words">{stepContent}</p>
+        <div className="ml-3 pl-1 mt-0.5 mb-1 text-[11px] text-[var(--text-muted)] leading-relaxed animate-in fade-in duration-150 space-y-1 select-text">
+          {hasUpdates ? (
+            updates.map((upd) => (
+              <p key={upd.id || `upd-${upd.sequence}`} className="whitespace-pre-wrap break-words select-text">
+                {upd.content}
+              </p>
+            ))
+          ) : (
+            <p className="whitespace-pre-wrap break-words select-text">{stepContent}</p>
+          )}
         </div>
       )}
     </div>
   );
 }, (prev, next) => {
-  return (
-    prev.stepKey === next.stepKey &&
-    prev.evt.status === next.evt.status &&
-    prev.evt.label === next.evt.label &&
-    prev.evt.safeSummary === next.evt.safeSummary &&
-    prev.evt.description === next.evt.description &&
-    prev.isExpanded === next.isExpanded &&
-    prev.onToggle === next.onToggle
-  );
+  if (
+    prev.stepKey !== next.stepKey ||
+    prev.evt.status !== next.evt.status ||
+    prev.evt.label !== next.evt.label ||
+    prev.evt.safeSummary !== next.evt.safeSummary ||
+    prev.evt.description !== next.evt.description ||
+    prev.isExpanded !== next.isExpanded ||
+    prev.onToggle !== next.onToggle
+  ) {
+    return false;
+  }
+
+  const pUpdates = prev.evt.updates;
+  const nUpdates = next.evt.updates;
+  if (!pUpdates && !nUpdates) return true;
+  if (!pUpdates || !nUpdates) return false;
+  if (pUpdates.length !== nUpdates.length) return false;
+
+  for (let i = 0; i < pUpdates.length; i++) {
+    if (pUpdates[i].content !== nUpdates[i].content || pUpdates[i].id !== nUpdates[i].id) {
+      return false;
+    }
+  }
+
+  return true;
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -154,15 +185,32 @@ export const ActivityTimeline = memo(
         const key = evt.id || evt.stepId || `${evt.eventType}-${evt.order ?? evt.timestamp}`;
         const idx = idMap.get(key);
         if (idx !== undefined) {
+          const mergedUpdates = [...(list[idx].updates || [])];
+          if (evt.updates && evt.updates.length > 0) {
+            for (const u of evt.updates) {
+              const uIdx = mergedUpdates.findIndex((x) => x.id === u.id);
+              if (uIdx !== -1) {
+                mergedUpdates[uIdx] = u;
+              } else {
+                mergedUpdates.push(u);
+              }
+            }
+            mergedUpdates.sort((a, b) => a.sequence - b.sequence);
+          }
+
           list[idx] = {
             ...list[idx],
             ...evt,
             safeSummary: evt.safeSummary !== undefined ? evt.safeSummary : list[idx].safeSummary,
             description: evt.description !== undefined ? evt.description : list[idx].description,
+            updates: mergedUpdates.length > 0 ? mergedUpdates : list[idx].updates,
           };
         } else {
           idMap.set(key, list.length);
-          list.push(evt);
+          list.push({
+            ...evt,
+            updates: evt.updates ? [...evt.updates] : undefined,
+          });
         }
       }
       return list;
@@ -195,6 +243,11 @@ export const ActivityTimeline = memo(
     }, [isFinalResponseStarted]);
 
     const handleToggleContainer = useCallback(() => {
+      // If user is currently highlighting text, allow copying without toggling accordion
+      const selection = typeof window !== 'undefined' ? window.getSelection() : null;
+      if (selection && selection.toString().trim().length > 0) {
+        return;
+      }
       userToggledContainerRef.current = true;
       setIsExpanded((prev) => !prev);
     }, []);
@@ -225,19 +278,19 @@ export const ActivityTimeline = memo(
     if (!isGenerating && !hasEvents && !error) return null;
 
     return (
-      <div className="w-full mb-3 select-none" role="region" aria-label="Agent working">
+      <div className="w-full mb-3 select-text" role="region" aria-label="Agent working">
         {/* ── Parent header toggle: Working v / Working > ───────────────────── */}
         <button
           type="button"
           onClick={handleToggleContainer}
-          className="group inline-flex items-center gap-1.5 py-0.5 px-1 -ml-1 rounded-md text-xs text-[var(--text-muted)] hover:text-[var(--text)] hover:bg-[var(--accent)]/40 transition-colors duration-150 cursor-pointer"
+          className="group inline-flex items-center gap-1.5 py-0.5 px-1 -ml-1 rounded-md text-xs select-text text-[var(--text-muted)] hover:text-[var(--text)] hover:bg-[var(--accent)]/40 transition-colors duration-150 cursor-pointer"
           aria-expanded={isExpanded}
           aria-controls="activity-steps-panel"
           title={isExpanded ? 'Collapse working steps' : 'Expand working steps'}
         >
           {/* Label with left-to-right CSS shimmer during active generation */}
           <span
-            className={`font-medium leading-none ${
+            className={`font-medium leading-none select-text ${
               isActivelyWorking
                 ? 'thinking-label-shimmer animate-text-shimmer'
                 : error

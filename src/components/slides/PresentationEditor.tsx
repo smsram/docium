@@ -2,6 +2,7 @@
 
 import React, { useState, useEffect } from 'react';
 import Link from 'next/link';
+import Image from 'next/image';
 import { useWorkspaceStore } from '@/lib/store';
 import { WorkspaceAI } from '@/components/workspace/WorkspaceAI';
 import {
@@ -98,7 +99,14 @@ export function PresentationEditor({ presentationId, showBackToHome = false }: P
             }`}
             title="Toggle Docium AI Panel"
           >
-            <Sparkles className="h-3.5 w-3.5" />
+            <Image
+              src="/docium-ai.png"
+              alt="Docium AI"
+              width={14}
+              height={14}
+              className="h-3.5 w-3.5 object-contain shrink-0"
+              unoptimized
+            />
             <span className="hidden sm:inline">Docium AI</span>
           </button>
         </div>

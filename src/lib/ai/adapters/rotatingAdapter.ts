@@ -24,8 +24,10 @@ import {
   parseCommaSeparatedKeys,
   parseCloudflarePairs,
   orderKeysByAvailability,
+  orderCloudflarePairsByAvailability,
   isCredentialError,
   setKeyCooldown,
+  setCloudflarePairCooldown,
   maskSecret,
 } from '../credentials';
 
@@ -66,11 +68,13 @@ export class RotatingProviderAdapter implements BaseProviderAdapter {
         return;
       }
 
+      const orderedPairs = orderCloudflarePairsByAvailability(pairs, options.preferredPairIndex);
+
       let lastError = '';
       let hasYieldedVisibleContent = false;
 
-      for (let i = 0; i < pairs.length; i++) {
-        const pair = pairs[i];
+      for (let i = 0; i < orderedPairs.length; i++) {
+        const pair = orderedPairs[i];
         let streamError: string | null = null;
         let yieldedInThisAttempt = false;
 
@@ -89,6 +93,11 @@ export class RotatingProviderAdapter implements BaseProviderAdapter {
             if (chunk.type === 'delta' || chunk.type === 'tool_call') {
               hasYieldedVisibleContent = true;
               yieldedInThisAttempt = true;
+              options.onCredentialActive?.({
+                providerId: 'cloudflare',
+                index: pairs.findIndex((p) => p.accountId === pair.accountId && p.apiToken === pair.apiToken),
+                accountId: pair.accountId,
+              });
               yield chunk;
             } else if (chunk.type === 'error' && chunk.error) {
               streamError = chunk.error;
@@ -103,6 +112,11 @@ export class RotatingProviderAdapter implements BaseProviderAdapter {
 
         if (!streamError) {
           // Stream completed successfully with this credential
+          options.onCredentialActive?.({
+            providerId: 'cloudflare',
+            index: pairs.findIndex((p) => p.accountId === pair.accountId && p.apiToken === pair.apiToken),
+            accountId: pair.accountId,
+          });
           return;
         }
 
@@ -115,20 +129,29 @@ export class RotatingProviderAdapter implements BaseProviderAdapter {
         }
 
         // Check if qualifying credential error that allows rotation
-        if (isCredentialError(undefined, streamError) && i < pairs.length - 1) {
-          setKeyCooldown('cloudflare', `${pair.accountId}:${pair.apiToken}`, 60);
+        const isCred = isCredentialError(undefined, streamError);
+        if (isCred && i < orderedPairs.length - 1) {
+          const isAccountQuota = streamError.toLowerCase().includes('quota') || streamError.toLowerCase().includes('limit');
+          setCloudflarePairCooldown(pair, 60, isAccountQuota);
+
           if (process.env.NODE_ENV !== 'production') {
             console.warn(
-              `[Cloudflare] Pair ${i + 1}/${pairs.length} (Account: ${maskSecret(pair.accountId)}, Token: ${maskSecret(pair.apiToken)}) failed with credential/quota error. Rotating silently to pair ${i + 2}...`
+              `[Cloudflare] Pair ${i + 1}/${orderedPairs.length} (Account: ${maskSecret(pair.accountId)}, Token: ${maskSecret(pair.apiToken)}) failed with credential/quota error. Rotating silently to pair ${i + 2}...`
             );
           }
           continue; // Rotate to next pair
         }
 
-        // Non-credential error (e.g. invalid model, bad payload, network failure, 5xx)
-        // or last pair reached: do NOT try subsequent keys
-        const finalMsg = pairs.length > 1
-          ? `All ${pairs.length} configured Cloudflare credentials failed. ${streamError}`
+        // Non-credential error (e.g. 400 Bad Request, payload/image error, invalid model, network failure)
+        // Immediately halt without credential rotation and without misleading "All credentials failed" message
+        if (!isCred) {
+          yield { type: 'error', error: streamError };
+          return;
+        }
+
+        // Last credential reached and all attempts were genuine credential failures
+        const finalMsg = orderedPairs.length > 1
+          ? `All ${orderedPairs.length} configured Cloudflare credentials failed authentication/quota checks. ${streamError}`
           : streamError;
         yield { type: 'error', error: finalMsg };
         return;
@@ -136,7 +159,7 @@ export class RotatingProviderAdapter implements BaseProviderAdapter {
 
       yield {
         type: 'error',
-        error: `All ${pairs.length} configured Cloudflare credentials failed. Most recent error: ${lastError}`,
+        error: `All ${orderedPairs.length} configured Cloudflare credentials failed. Most recent error: ${lastError}`,
       };
       return;
     }
@@ -186,6 +209,10 @@ export class RotatingProviderAdapter implements BaseProviderAdapter {
 
       if (!streamError) {
         // Stream completed successfully with this key
+        options.onCredentialActive?.({
+          providerId,
+          index: rawKeys.indexOf(activeKey),
+        });
         return;
       }
 
@@ -198,7 +225,8 @@ export class RotatingProviderAdapter implements BaseProviderAdapter {
       }
 
       // Check if qualifying credential error that allows rotation
-      if (isCredentialError(undefined, streamError) && i < orderedKeys.length - 1) {
+      const isCred = isCredentialError(undefined, streamError);
+      if (isCred && i < orderedKeys.length - 1) {
         setKeyCooldown(providerId, activeKey, 60);
         if (process.env.NODE_ENV !== 'production') {
           console.warn(
@@ -208,10 +236,14 @@ export class RotatingProviderAdapter implements BaseProviderAdapter {
         continue; // Rotate to next key
       }
 
-      // Non-credential error (e.g. invalid model, bad payload, network failure, 5xx)
-      // or last key reached: do NOT try subsequent keys
+      // Non-credential error: halt immediately without misleading "All keys failed" message
+      if (!isCred) {
+        yield { type: 'error', error: streamError };
+        return;
+      }
+
       const finalMsg = orderedKeys.length > 1
-        ? `All ${orderedKeys.length} configured API keys for ${providerId} failed. ${streamError}`
+        ? `All ${orderedKeys.length} configured API keys for ${providerId} failed authentication/quota checks. ${streamError}`
         : streamError;
       yield { type: 'error', error: finalMsg };
       return;
