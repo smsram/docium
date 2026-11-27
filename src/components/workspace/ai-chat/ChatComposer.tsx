@@ -100,7 +100,7 @@ export function ChatComposer({
       }
     }
 
-    // 2. Strict Workspace Isolation: Sources belonging exclusively to the currently active workspace
+    // 2. Sources belonging to the active workspace first, then any other workspace sources
     const currentWorkspaceSources = workspaceId ? getDocumentSources(workspaceId) : [];
     for (const s of currentWorkspaceSources) {
       if (!seen.has(s.title.toLowerCase())) {
@@ -109,37 +109,42 @@ export function ChatComposer({
       }
     }
 
-    // Also check store sources explicitly tagged with this workspaceId
-    if (workspaceId) {
-      for (const s of sources) {
-        if (s.workspaceId === workspaceId && !seen.has(s.title.toLowerCase())) {
-          seen.add(s.title.toLowerCase());
-          list.push({ id: s.id, title: s.title, type: s.type, size: s.fileSize });
-        }
+    for (const s of sources) {
+      if (s.workspaceId === workspaceId && !seen.has(s.title.toLowerCase())) {
+        seen.add(s.title.toLowerCase());
+        list.push({ id: s.id, title: s.title, type: s.type, size: s.fileSize });
+      }
+    }
+    for (const s of sources) {
+      if (!seen.has(s.title.toLowerCase())) {
+        seen.add(s.title.toLowerCase());
+        list.push({ id: s.id, title: s.title, type: s.type, size: s.fileSize });
       }
     }
 
-    // 3. Active workspace document itself (only if ID matches active workspace)
-    if (workspaceId) {
-      const activeDoc = documents.find((d) => d.id === workspaceId);
-      if (activeDoc && !seen.has(`${activeDoc.title}.docx`.toLowerCase())) {
-        seen.add(`${activeDoc.title}.docx`.toLowerCase());
-        list.push({ id: activeDoc.id, title: `${activeDoc.title}.docx`, type: 'docx', size: activeDoc.size });
+    // 3. Workspace files (active file + other docs, sheets, slides, pdfs in workspace)
+    for (const d of documents) {
+      if (!seen.has(`${d.title}.docx`.toLowerCase())) {
+        seen.add(`${d.title}.docx`.toLowerCase());
+        list.push({ id: d.id, title: `${d.title}.docx`, type: 'docx', size: d.size });
       }
-      const activeSheet = sheets.find((s) => s.id === workspaceId);
-      if (activeSheet && !seen.has(`${activeSheet.title}.xlsx`.toLowerCase())) {
-        seen.add(`${activeSheet.title}.xlsx`.toLowerCase());
-        list.push({ id: activeSheet.id, title: `${activeSheet.title}.xlsx`, type: 'xlsx' });
+    }
+    for (const p of pdfs) {
+      if (!seen.has(`${p.title}.pdf`.toLowerCase())) {
+        seen.add(`${p.title}.pdf`.toLowerCase());
+        list.push({ id: p.id, title: `${p.title}.pdf`, type: 'pdf', size: p.size });
       }
-      const activeSlide = slides.find((sl) => sl.id === workspaceId);
-      if (activeSlide && !seen.has(`${activeSlide.title}.pptx`.toLowerCase())) {
-        seen.add(`${activeSlide.title}.pptx`.toLowerCase());
-        list.push({ id: activeSlide.id, title: `${activeSlide.title}.pptx`, type: 'pptx' });
+    }
+    for (const sh of sheets) {
+      if (!seen.has(`${sh.title}.xlsx`.toLowerCase())) {
+        seen.add(`${sh.title}.xlsx`.toLowerCase());
+        list.push({ id: sh.id, title: `${sh.title}.xlsx`, type: 'xlsx' });
       }
-      const activePdf = pdfs.find((p) => p.id === workspaceId);
-      if (activePdf && !seen.has(`${activePdf.title}.pdf`.toLowerCase())) {
-        seen.add(`${activePdf.title}.pdf`.toLowerCase());
-        list.push({ id: activePdf.id, title: `${activePdf.title}.pdf`, type: 'pdf', size: activePdf.size });
+    }
+    for (const sl of slides) {
+      if (!seen.has(`${sl.title}.pptx`.toLowerCase())) {
+        seen.add(`${sl.title}.pptx`.toLowerCase());
+        list.push({ id: sl.id, title: `${sl.title}.pptx`, type: 'pptx' });
       }
     }
 

@@ -83,6 +83,7 @@ export class RotatingProviderAdapter implements BaseProviderAdapter {
             ...options,
             accountId: pair.accountId,
             apiKey: pair.apiToken,
+            fastFailOn429: i < orderedPairs.length - 1,
           });
 
           for await (const chunk of stream) {

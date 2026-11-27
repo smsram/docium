@@ -21,21 +21,11 @@ export interface DocumentCapability {
   parameters?: Record<string, { type: string; description: string; required?: boolean; enum?: string[] }>;
 }
 
-export const SUPPORTED_FONT_FAMILIES = [
-  'Inter, sans-serif',
-  'Geist, sans-serif',
-  'Georgia, serif',
-  'Merriweather, Georgia, serif',
-  '"Playfair Display", Georgia, serif',
-  '"JetBrains Mono", monospace',
-  'Arial, Helvetica, sans-serif',
-  '"Times New Roman", Times, serif',
-] as const;
+import { FONT_CATALOG, FONT_SIZE_PT_VALUES } from './fontCatalog';
 
-export const SUPPORTED_FONT_SIZES = [
-  '8pt', '9pt', '10pt', '11pt', '12pt', '13pt', '14pt', '16pt',
-  '18pt', '20pt', '24pt', '28pt', '32pt', '36pt', '48pt', '72pt',
-] as const;
+export const SUPPORTED_FONT_FAMILIES = FONT_CATALOG.map((f) => f.value);
+
+export const SUPPORTED_FONT_SIZES = FONT_SIZE_PT_VALUES.map((s) => `${s}pt`);
 
 export const SUPPORTED_PAGE_SIZES = ['A4', 'Letter', 'Legal'] as const;
 export const SUPPORTED_ORIENTATIONS = ['portrait', 'landscape'] as const;

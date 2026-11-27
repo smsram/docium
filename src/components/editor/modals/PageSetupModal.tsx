@@ -53,7 +53,7 @@ export function PageSetupModal({
   footerText: initialFooterText = '',
   firstPageHeaderText: initialFirstPageHeaderText = '',
   firstPageFooterText: initialFirstPageFooterText = '',
-  showPageNumbers: initialShowPageNumbers = true,
+  showPageNumbers: initialShowPageNumbers = false,
   differentFirstPage: initialDifferentFirstPage = false,
   onSave,
 }: PageSetupModalProps) {

@@ -35,8 +35,10 @@ import {
   Sliders,
   FilePlus,
   CheckSquare,
+  Sigma,
 } from 'lucide-react';
 import { ShapeAttributes } from '../extensions/ShapeNode';
+import { convertMarkdownAndLatexToHtml } from '../utils/markdownToHtml';
 
 export type ContextMenuType =
   | 'selection'
@@ -131,41 +133,40 @@ export function ContextMenu({
   onOpenPageSetup,
 }: ContextMenuProps) {
   const menuRef = useRef<HTMLDivElement>(null);
-  const [adjustedPos, setAdjustedPos] = useState({ x: state.x, y: state.y });
-  const [isPositioned, setIsPositioned] = useState(false);
+  const [edgeOffset, setEdgeOffset] = useState<{ x: number; y: number } | null>(null);
   const mounted = useSyncExternalStore(
     () => () => {},
     () => true,
     () => false
   );
 
-  // Reposition within viewport boundaries with zero initial frame (0,0) flash
+  // Clamp synchronously to viewport on initial render so it NEVER starts at (0, 0)
+  const clampToViewport = useCallback((rawX: number, rawY: number, width = 256, height = 320) => {
+    if (typeof window === 'undefined') return { x: rawX, y: rawY };
+    const padding = 10;
+    let x = rawX;
+    let y = rawY;
+    if (x + width > window.innerWidth - padding) x = window.innerWidth - width - padding;
+    if (y + height > window.innerHeight - padding) y = window.innerHeight - height - padding;
+    if (x < padding) x = padding;
+    if (y < padding) y = padding;
+    return { x, y };
+  }, []);
+
+  // Fine-tune using actual measured menu dimensions once mounted
   useLayoutEffect(() => {
-    if (state.isOpen) {
-      const menuEl = menuRef.current;
-      const padding = 10;
-      const menuWidth = menuEl?.offsetWidth || 256;
-      const menuHeight = menuEl?.offsetHeight || 300;
-
-      let newX = state.x;
-      let newY = state.y;
-
-      if (newX + menuWidth > window.innerWidth - padding) {
-        newX = window.innerWidth - menuWidth - padding;
-      }
-      if (newY + menuHeight > window.innerHeight - padding) {
-        newY = window.innerHeight - menuHeight - padding;
-      }
-      if (newX < padding) newX = padding;
-      if (newY < padding) newY = padding;
-
-      setAdjustedPos({ x: newX, y: newY });
-      setIsPositioned(true);
+    if (!state.isOpen) {
+      setEdgeOffset(null);
+      return;
     }
-  }, [state.isOpen, state.x, state.y]);
+    const menuEl = menuRef.current;
+    if (!menuEl) return;
+    const clamped = clampToViewport(state.x, state.y, menuEl.offsetWidth || 256, menuEl.offsetHeight || 320);
+    setEdgeOffset(clamped);
+  }, [state.isOpen, state.x, state.y, clampToViewport]);
 
   const handleClose = useCallback(() => {
-    setIsPositioned(false);
+    setEdgeOffset(null);
     onClose();
   }, [onClose]);
 
@@ -196,7 +197,7 @@ export function ContextMenu({
   if (!state.isOpen || !editor) return null;
 
   const runAndClose = (action: () => void) => {
-    setIsPositioned(false);
+    setEdgeOffset(null);
     action();
     onClose();
   };
@@ -218,16 +219,195 @@ export function ContextMenu({
     }
   };
 
-  const handlePaste = async () => {
+  const handlePaste = async (mode: 'default' | 'with-formatting' | 'without-formatting' = 'default') => {
     try {
-      const text = await navigator.clipboard.readText();
-      if (text) {
-        editor.chain().focus().insertContent(text).run();
+      let clipboardHtml = '';
+      let clipboardText = '';
+
+      if (typeof navigator.clipboard.read === 'function') {
+        try {
+          const items = await navigator.clipboard.read();
+          for (const item of items) {
+            if (!clipboardHtml && item.types.includes('text/html')) {
+              clipboardHtml = await (await item.getType('text/html')).text();
+            }
+            if (!clipboardText && item.types.includes('text/plain')) {
+              clipboardText = await (await item.getType('text/plain')).text();
+            }
+          }
+        } catch {
+          // Fall back to readText below
+        }
+      }
+
+      if (!clipboardText) {
+        clipboardText = await navigator.clipboard.readText();
+      }
+
+      if (mode === 'without-formatting') {
+        if (clipboardText) {
+          editor.chain().focus().unsetAllMarks().insertContent({ type: 'text', text: clipboardText }).run();
+        }
+        return;
+      }
+
+      // If Paste with Formatting (or Default) and plain text contains Markdown (*, **, #, -, >, ```, tables) or LaTeX ($...$, $$...$$, \(...\), \[...\])
+      const hasMarkdownOrLatex = Boolean(
+        clipboardText &&
+          /(?:\*\*[^*\n]+\*\*|\*[^*\n]+\*|~~[^~\n]+~~|`[^`\n]+`|^#{1,6}\s|^[-*+]\s|^\d+\.\s|^>\s|\$\$[\s\S]+?\$\$|\\\[[\s\S]+?\\\]|\\\([\s\S]+?\\\)|(?<!\\)\$(?!\d)[^$\n]+\$)/m.test(
+            clipboardText
+          )
+      );
+
+      if (hasMarkdownOrLatex && clipboardText) {
+        const renderedHtml = convertMarkdownAndLatexToHtml(clipboardText);
+        editor.chain().focus().insertContent(renderedHtml).run();
+        return;
+      }
+
+      if (clipboardHtml.trim()) {
+        editor.chain().focus().insertContent(clipboardHtml).run();
+        return;
+      }
+
+      if (clipboardText) {
+        editor.chain().focus().insertContent(clipboardText).run();
       }
     } catch {
-      // Fallback
+      editor.chain().focus().run();
     }
   };
+
+  const renderSelectedFormula = () => {
+    const { from, to } = editor.state.selection;
+    if (from === to) return;
+    const raw = editor.state.doc.textBetween(from, to, '\n').trim();
+    if (!raw) return;
+
+    const isBlock = /^\$\$[\s\S]+\$\$$|^\\\[[\s\S]+\\\]$/.test(raw);
+    const cleaned = raw
+      .replace(/^\$\$([\s\S]+)\$\$$/, '$1')
+      .replace(/^\\\[([\s\S]+)\\\]$/, '$1')
+      .replace(/^\$([\s\S]+)\$$/, '$1')
+      .replace(/^\\\(([\s\S]+)\\\)$/, '$1')
+      .trim();
+    if (!cleaned) return;
+
+    editor
+      .chain()
+      .focus()
+      .insertContentAt(
+        { from, to },
+        {
+          type: isBlock ? 'equation' : 'inlineEquation',
+          attrs: { latex: cleaned, ...(isBlock ? { displayMode: true } : {}) },
+        }
+      )
+      .run();
+  };
+
+  const renderAllFormulasInDocument = () => {
+    const replacements: Array<{ from: number; to: number; nodeType: 'equation' | 'inlineEquation'; latex: string }> = [];
+    const latexRe = /\$\$([\s\S]+?)\$\$|\\\[([\s\S]+?)\\\]|\\\(([\s\S]+?)\\\)|(?<!\\)\$(?!\d+(?:[.,]\d+)?(?:\s|$|[.,;!?)]))([^$\n]+?)\$/g;
+
+    editor.state.doc.descendants((node, pos) => {
+      if (node.isText && node.text) {
+        let m: RegExpExecArray | null;
+        latexRe.lastIndex = 0;
+        while ((m = latexRe.exec(node.text)) !== null) {
+          const isBlock = Boolean(m[1] || m[2]);
+          const latex = (m[1] || m[2] || m[3] || m[4] || '').trim();
+          if (latex) {
+            replacements.push({
+              from: pos + m.index,
+              to: pos + m.index + m[0].length,
+              nodeType: isBlock ? 'equation' : 'inlineEquation',
+              latex,
+            });
+          }
+        }
+      }
+    });
+
+    if (replacements.length === 0) return;
+    const tr = editor.state.tr;
+    for (let i = replacements.length - 1; i >= 0; i--) {
+      const r = replacements[i];
+      const schemaNode = editor.state.schema.nodes[r.nodeType];
+      if (schemaNode) {
+        tr.replaceWith(
+          r.from,
+          r.to,
+          schemaNode.create({ latex: r.latex, ...(r.nodeType === 'equation' ? { displayMode: true } : {}) })
+        );
+      }
+    }
+    editor.view.dispatch(tr);
+  };
+
+  const derenderSelectedFormula = () => {
+    const { from, to } = editor.state.selection;
+    const nodes: Array<{ from: number; to: number; text: string }> = [];
+    editor.state.doc.nodesBetween(from, to, (node, pos) => {
+      if (node.type.name === 'inlineEquation') {
+        nodes.push({ from: pos, to: pos + node.nodeSize, text: `$${node.attrs.latex || ''}$` });
+      } else if (node.type.name === 'equation') {
+        nodes.push({ from: pos, to: pos + node.nodeSize, text: `$$${node.attrs.latex || ''}$$` });
+      }
+    });
+    if (nodes.length === 0) return;
+    const tr = editor.state.tr;
+    for (let i = nodes.length - 1; i >= 0; i--) {
+      const n = nodes[i];
+      tr.replaceWith(n.from, n.to, editor.state.schema.text(n.text));
+    }
+    editor.view.dispatch(tr);
+  };
+
+  const derenderAllFormulasInDocument = () => {
+    const nodes: Array<{ from: number; to: number; text: string; isBlock: boolean }> = [];
+    editor.state.doc.descendants((node, pos) => {
+      if (node.type.name === 'inlineEquation') {
+        nodes.push({ from: pos, to: pos + node.nodeSize, text: `$${node.attrs.latex || ''}$`, isBlock: false });
+      } else if (node.type.name === 'equation') {
+        nodes.push({ from: pos, to: pos + node.nodeSize, text: `$$${node.attrs.latex || ''}$$`, isBlock: true });
+      }
+    });
+    if (nodes.length === 0) return;
+    const tr = editor.state.tr;
+    const pType = editor.state.schema.nodes.paragraph;
+    for (let i = nodes.length - 1; i >= 0; i--) {
+      const n = nodes[i];
+      if (n.isBlock && pType) {
+        tr.replaceWith(n.from, n.to, pType.create(null, editor.state.schema.text(n.text)));
+      } else {
+        tr.replaceWith(n.from, n.to, editor.state.schema.text(n.text));
+      }
+    }
+    editor.view.dispatch(tr);
+  };
+
+  const renderPasteOptions = () => (
+    <>
+      <MenuItem
+        icon={ClipboardPaste}
+        label="Paste"
+        shortcut="Ctrl+V"
+        onClick={() => runAndClose(() => void handlePaste('default'))}
+      />
+      <MenuItem
+        icon={ClipboardPaste}
+        label="Paste with Formatting"
+        onClick={() => runAndClose(() => void handlePaste('with-formatting'))}
+      />
+      <MenuItem
+        icon={RemoveFormatting}
+        label="Paste without Formatting"
+        shortcut="Ctrl+Shift+V"
+        onClick={() => runAndClose(() => void handlePaste('without-formatting'))}
+      />
+    </>
+  );
 
   // ==================== A. SELECTED TEXT MENU ====================
   const renderSelectionMenu = () => {
@@ -241,7 +421,7 @@ export function ContextMenu({
       <div className="flex flex-col w-full">
         <MenuItem icon={Scissors} label="Cut" shortcut="Ctrl+X" onClick={() => runAndClose(handleCut)} />
         <MenuItem icon={Copy} label="Copy" shortcut="Ctrl+C" onClick={() => runAndClose(handleCopy)} />
-        <MenuItem icon={ClipboardPaste} label="Paste" shortcut="Ctrl+V" onClick={() => runAndClose(handlePaste)} />
+        {renderPasteOptions()}
 
         <MenuDivider />
 
@@ -306,6 +486,30 @@ export function ContextMenu({
         <MenuDivider />
 
         <MenuItem
+          icon={Sigma}
+          label="Render Selected Formula (LaTeX)"
+          colorClass="text-[var(--primary)]"
+          onClick={() => runAndClose(renderSelectedFormula)}
+        />
+        <MenuItem
+          icon={Sigma}
+          label="Render All Formulas in Document"
+          onClick={() => runAndClose(renderAllFormulasInDocument)}
+        />
+        <MenuItem
+          icon={RemoveFormatting}
+          label="Derender Selected Formula"
+          onClick={() => runAndClose(derenderSelectedFormula)}
+        />
+        <MenuItem
+          icon={RemoveFormatting}
+          label="Derender All Formulas"
+          onClick={() => runAndClose(derenderAllFormulasInDocument)}
+        />
+
+        <MenuDivider />
+
+        <MenuItem
           icon={RemoveFormatting}
           label="Clear Formatting"
           colorClass="text-[var(--text-muted)]"
@@ -319,7 +523,7 @@ export function ContextMenu({
   const renderParagraphMenu = () => {
     return (
       <div className="flex flex-col w-full">
-        <MenuItem icon={ClipboardPaste} label="Paste" shortcut="Ctrl+V" onClick={() => runAndClose(handlePaste)} />
+        {renderPasteOptions()}
 
         <MenuDivider />
 
@@ -486,6 +690,24 @@ export function ContextMenu({
 
         <MenuDivider />
 
+        <div className="px-2.5 py-1 text-[10px] uppercase tracking-wider text-[var(--text-muted)] font-semibold">
+          Cell Shading
+        </div>
+        <div className="flex items-center gap-1.5 px-2.5 py-1">
+          {['#FFFFFF', '#F1F5F3', '#EAF2ED', '#DBEAFE', '#FEF3C7', '#FFE4E6', '#245C45'].map((color) => (
+            <button
+              key={color}
+              type="button"
+              onClick={() => runAndClose(() => editor.chain().focus().setCellBackground(color === '#FFFFFF' ? null : color).run())}
+              style={{ backgroundColor: color }}
+              className="w-4 h-4 rounded-full border border-[var(--border)] hover:scale-125 transition-transform cursor-pointer"
+              title={`Shade cell ${color}`}
+            />
+          ))}
+        </div>
+
+        <MenuDivider />
+
         <MenuItem
           icon={Trash2}
           label="Delete Entire Table"
@@ -599,7 +821,7 @@ export function ContextMenu({
   const renderCanvasMenu = () => {
     return (
       <div className="flex flex-col w-full">
-        <MenuItem icon={ClipboardPaste} label="Paste" shortcut="Ctrl+V" onClick={() => runAndClose(handlePaste)} />
+        {renderPasteOptions()}
         <MenuItem
           icon={CheckSquare}
           label="Select All"
@@ -646,22 +868,36 @@ export function ContextMenu({
           colorClass="text-[var(--primary)] font-medium"
           onClick={() => runAndClose(onOpenPageSetup)}
         />
+
+        <MenuDivider />
+
+        <MenuItem
+          icon={Sigma}
+          label="Render All Formulas in Document"
+          onClick={() => runAndClose(renderAllFormulasInDocument)}
+        />
+        <MenuItem
+          icon={RemoveFormatting}
+          label="Derender All Formulas"
+          onClick={() => runAndClose(derenderAllFormulasInDocument)}
+        />
       </div>
     );
   };
 
   if (!mounted || typeof document === 'undefined') return null;
 
+  const displayPos = edgeOffset ?? clampToViewport(state.x, state.y);
+
   return createPortal(
     <div
+      key={`${state.x}-${state.y}`}
       ref={menuRef}
       style={{
-        left: `${adjustedPos.x}px`,
-        top: `${adjustedPos.y}px`,
-        visibility: isPositioned ? 'visible' : 'hidden',
-        opacity: isPositioned ? 1 : 0,
+        left: `${displayPos.x}px`,
+        top: `${displayPos.y}px`,
       }}
-      className="fixed z-[60] w-64 flex flex-col rounded-xl border border-[var(--border)] bg-[var(--surface)] p-1.5 shadow-2xl animate-in fade-in zoom-in-95 duration-100 text-xs text-[var(--text)] select-none"
+      className="fixed z-[60] w-64 flex flex-col rounded-xl border border-[var(--border)] bg-[var(--surface)] p-1.5 shadow-2xl text-xs text-[var(--text)] select-none"
     >
       {state.type === 'selection' && renderSelectionMenu()}
       {state.type === 'paragraph' && renderParagraphMenu()}

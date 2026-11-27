@@ -36,19 +36,22 @@ export const Callout = Node.create({
 
   renderHTML({ HTMLAttributes }) {
     const type = (HTMLAttributes['data-callout-type'] || 'info') as CalloutType;
-    const typeStyles: Record<CalloutType, string> = {
-      info: 'bg-emerald-50/70 dark:bg-emerald-950/20 border-emerald-500 text-emerald-950 dark:text-emerald-100',
-      tip: 'bg-blue-50/70 dark:bg-blue-950/20 border-blue-500 text-blue-950 dark:text-blue-100',
-      warning: 'bg-amber-50/70 dark:bg-amber-950/20 border-amber-500 text-amber-950 dark:text-amber-100',
-      danger: 'bg-rose-50/70 dark:bg-rose-950/20 border-rose-500 text-rose-950 dark:text-rose-100',
-      note: 'bg-stone-50 dark:bg-stone-900/40 border-stone-400 text-stone-900 dark:text-stone-100',
+    const typeStyles: Record<CalloutType, { bg: string; border: string; color: string }> = {
+      info: { bg: '#ECFDF5', border: '#10B981', color: '#064E3B' },
+      tip: { bg: '#EFF6FF', border: '#3B82F6', color: '#1E3A8A' },
+      warning: { bg: '#FFFBEB', border: '#F59E0B', color: '#78350F' },
+      danger: { bg: '#FFF1F2', border: '#F43F5E', color: '#881337' },
+      note: { bg: '#F5F5F4', border: '#78716C', color: '#1C1917' },
     };
+    const pal = typeStyles[type] || typeStyles.info;
 
     return [
       'div',
       mergeAttributes(HTMLAttributes, {
         'data-type': 'callout',
-        class: `callout-box my-4 rounded-lg p-4 border-l-4 transition-colors ${typeStyles[type] || typeStyles.info}`,
+        'data-callout-type': type,
+        class: 'callout-box my-3 rounded-md p-3.5 transition-colors',
+        style: `background-color: ${pal.bg}; border-left: 4px solid ${pal.border}; color: ${pal.color}; margin: 8pt 0; padding: 8pt 12pt; border-radius: 4px;`,
       }),
       0,
     ];

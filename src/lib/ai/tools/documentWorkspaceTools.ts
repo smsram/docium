@@ -1917,7 +1917,7 @@ export const setFontSizeTool: ToolCatalogEntry = {
   id: 'set_font_size',
   name: 'set_font_size',
   label: 'Set Font Size',
-  description: 'Set font size (in pt or px) for target text or selection.',
+  description: 'Set font size (in pt) for target text, selection, or entire document.',
   category: 'formatting',
   workspace: ['doc'],
   risk: 'modifying',
@@ -1925,7 +1925,7 @@ export const setFontSizeTool: ToolCatalogEntry = {
   parameters: {
     type: 'object',
     properties: {
-      fontSize: { type: 'number', description: 'Font size (e.g. 12, 14, 18, 20).' },
+      fontSize: { type: 'number', description: 'Font size in pt (e.g. 11, 12, 14, 18, 20, 24).' },
       targetText: { type: 'string', description: 'Optional target text scope.' },
     },
     required: ['fontSize'],
@@ -1933,9 +1933,9 @@ export const setFontSizeTool: ToolCatalogEntry = {
   execute: async (args, context) => {
     const val = validateActiveDoc(context);
     if (!val.ok) return { success: false, error: val.error };
-    const fontSize = Number(args.fontSize || 16);
+    const fontSize = Number(args.fontSize || 12);
 
-    const res = await editorRegistry.executeAction('set_font_style', { fontSize: `${fontSize}px`, targetText: args.targetText }, val.docId);
+    const res = await editorRegistry.executeAction('set_font_style', { fontSize: `${fontSize}pt`, targetText: args.targetText }, val.docId);
     if (!res.success) return { success: false, error: res.error || 'Failed to set font size.' };
     return { success: true, data: { fontSize }, activitySummary: `Set font size to ${fontSize}pt` };
   },
@@ -1963,7 +1963,7 @@ export const setFontColorTool: ToolCatalogEntry = {
     if (!val.ok) return { success: false, error: val.error };
     const color = String(args.color || '#000000');
 
-    const res = await editorRegistry.executeAction('format_document_text', { formatting: 'color', color, targetText: args.targetText }, val.docId);
+    const res = await editorRegistry.executeAction('format_document_text', { formatting: 'color', value: color, color, targetText: args.targetText }, val.docId);
     if (!res.success) return { success: false, error: res.error || 'Failed to set font color.' };
     return { success: true, data: { color }, activitySummary: `Set text color to ${color}` };
   },
@@ -1991,7 +1991,7 @@ export const setHighlightColorTool: ToolCatalogEntry = {
     if (!val.ok) return { success: false, error: val.error };
     const color = String(args.color || '#FEF08A');
 
-    const res = await editorRegistry.executeAction('format_document_text', { formatting: 'highlight', color, targetText: args.targetText }, val.docId);
+    const res = await editorRegistry.executeAction('format_document_text', { formatting: 'highlight', value: color, color, targetText: args.targetText }, val.docId);
     if (!res.success) return { success: false, error: res.error || 'Failed to highlight text.' };
     return { success: true, data: { color }, activitySummary: `Highlighted text with ${color}` };
   },
@@ -2018,7 +2018,7 @@ export const setBoldTool: ToolCatalogEntry = {
     if (!val.ok) return { success: false, error: val.error };
     const bold = args.bold !== false;
 
-    const res = await editorRegistry.executeAction('format_document_text', { formatting: bold ? 'bold' : 'clear', targetText: args.targetText }, val.docId);
+    const res = await editorRegistry.executeAction('format_document_text', { formatting: 'bold', enabled: bold, targetText: args.targetText }, val.docId);
     if (!res.success) return { success: false, error: res.error || 'Failed to update bold.' };
     return { success: true, data: { bold }, activitySummary: bold ? 'Applied bold formatting' : 'Removed bold formatting' };
   },
@@ -2045,7 +2045,7 @@ export const setItalicTool: ToolCatalogEntry = {
     if (!val.ok) return { success: false, error: val.error };
     const italic = args.italic !== false;
 
-    const res = await editorRegistry.executeAction('format_document_text', { formatting: italic ? 'italic' : 'clear', targetText: args.targetText }, val.docId);
+    const res = await editorRegistry.executeAction('format_document_text', { formatting: 'italic', enabled: italic, targetText: args.targetText }, val.docId);
     if (!res.success) return { success: false, error: res.error || 'Failed to update italic.' };
     return { success: true, data: { italic }, activitySummary: italic ? 'Applied italic formatting' : 'Removed italic formatting' };
   },
@@ -2072,7 +2072,7 @@ export const setUnderlineTool: ToolCatalogEntry = {
     if (!val.ok) return { success: false, error: val.error };
     const underline = args.underline !== false;
 
-    const res = await editorRegistry.executeAction('format_document_text', { formatting: underline ? 'underline' : 'clear', targetText: args.targetText }, val.docId);
+    const res = await editorRegistry.executeAction('format_document_text', { formatting: 'underline', enabled: underline, targetText: args.targetText }, val.docId);
     if (!res.success) return { success: false, error: res.error || 'Failed to update underline.' };
     return { success: true, data: { underline }, activitySummary: underline ? 'Applied underline formatting' : 'Removed underline formatting' };
   },
@@ -2099,7 +2099,7 @@ export const setStrikethroughTool: ToolCatalogEntry = {
     if (!val.ok) return { success: false, error: val.error };
     const strike = args.strikethrough !== false;
 
-    const res = await editorRegistry.executeAction('format_document_text', { formatting: strike ? 'strike' : 'clear', targetText: args.targetText }, val.docId);
+    const res = await editorRegistry.executeAction('format_document_text', { formatting: 'strike', enabled: strike, targetText: args.targetText }, val.docId);
     if (!res.success) return { success: false, error: res.error || 'Failed to update strikethrough.' };
     return { success: true, data: { strike }, activitySummary: strike ? 'Applied strikethrough formatting' : 'Removed strikethrough' };
   },
@@ -2109,7 +2109,7 @@ export const setTextAlignmentTool: ToolCatalogEntry = {
   id: 'set_text_alignment',
   name: 'set_text_alignment',
   label: 'Set Text Alignment',
-  description: 'Set text alignment (left, center, right, or justify).',
+  description: 'Set text alignment (left, center, right, or justify) for selection, target text, or the entire document.',
   category: 'formatting',
   workspace: ['doc'],
   risk: 'modifying',
@@ -2118,6 +2118,7 @@ export const setTextAlignmentTool: ToolCatalogEntry = {
     type: 'object',
     properties: {
       alignment: { type: 'string', enum: ['left', 'center', 'right', 'justify'], description: 'Text alignment.' },
+      targetText: { type: 'string', description: 'Optional specific text or paragraph to align.' },
     },
     required: ['alignment'],
   },
@@ -2126,7 +2127,7 @@ export const setTextAlignmentTool: ToolCatalogEntry = {
     if (!val.ok) return { success: false, error: val.error };
     const alignment = (args.alignment as 'left' | 'center' | 'right' | 'justify') || 'left';
 
-    const res = await editorRegistry.executeAction('change_document_alignment', { alignment }, val.docId);
+    const res = await editorRegistry.executeAction('change_document_alignment', { alignment, targetText: args.targetText }, val.docId);
     if (!res.success) return { success: false, error: res.error || 'Failed to change alignment.' };
     return { success: true, data: { alignment }, activitySummary: `Set alignment to ${alignment}` };
   },
@@ -2136,28 +2137,49 @@ export const setLineSpacingTool: ToolCatalogEntry = {
   id: 'set_line_spacing',
   name: 'set_line_spacing',
   label: 'Set Line Spacing',
-  description: 'Set line spacing (e.g. 1.0, 1.15, 1.5, 2.0).',
+  description: 'Set line spacing / line height (e.g. "1.0", "1.15", "1.5", "2.0") for the entire document, active selection, or specific target text.',
   category: 'formatting',
   workspace: ['doc'],
   risk: 'modifying',
   availability: 'implemented',
+  aliases: [
+    'change line spacing',
+    'make spacing 1',
+    'single spacing',
+    'double spacing',
+    'set line height',
+    'line spacing',
+  ],
+  keywords: ['spacing', 'line', 'height', 'single', 'double', '1.0', '1.15', '1.5', '2.0', 'line_spacing'],
   parameters: {
     type: 'object',
     properties: {
-      lineHeight: { type: 'string', description: 'Line height multiplier (e.g. "1.15", "1.5", "2.0").' },
+      lineHeight: { type: 'string', description: 'Line height multiplier (e.g. "1.0", "1.15", "1.5", "2.0").' },
       spaceBefore: { type: 'boolean', description: 'Add margin before paragraph.' },
       spaceAfter: { type: 'boolean', description: 'Add margin after paragraph.' },
+      targetText: { type: 'string', description: 'Optional specific text to apply line spacing to (omit to apply to whole document or selection).' },
     },
     required: ['lineHeight'],
   },
   execute: async (args, context) => {
     const val = validateActiveDoc(context);
     if (!val.ok) return { success: false, error: val.error };
-    const lineHeight = String(args.lineHeight || '1.5');
+    const rawLh = String(args.lineHeight ?? args.spacing ?? '1.0').trim();
+    const lineHeight = rawLh === '1' ? '1.0' : rawLh === '2' ? '2.0' : rawLh;
 
-    const res = await editorRegistry.executeAction('set_line_height', { lineHeight, spaceBefore: args.spaceBefore, spaceAfter: args.spaceAfter }, val.docId);
+    const res = await editorRegistry.executeAction(
+      'set_line_height',
+      {
+        lineHeight,
+        spaceBefore: args.spaceBefore,
+        spaceAfter: args.spaceAfter,
+        targetText: args.targetText,
+        scope: args.targetText ? 'target' : 'all',
+      },
+      val.docId
+    );
     if (!res.success) return { success: false, error: res.error || 'Failed to set line spacing.' };
-    return { success: true, data: { lineHeight }, activitySummary: `Set line spacing to ${lineHeight}` };
+    return { success: true, data: { lineHeight, changed: true }, activitySummary: `Set line spacing to ${lineHeight}` };
   },
 };
 
@@ -3311,9 +3333,17 @@ export const insertHyperlinkTool: ToolCatalogEntry = {
     if (!val.ok) return { success: false, error: val.error };
     const url = String(args.url || '');
 
-    const res = await editorRegistry.executeAction('insert_hyperlink', { url, text: args.text }, val.docId);
+    const res = await editorRegistry.executeAction(
+      'insert_hyperlink',
+      { url, text: args.text, targetText: args.targetText },
+      val.docId
+    );
     if (!res.success) return { success: false, error: res.error || 'Failed to insert hyperlink.' };
-    return { success: true, data: { url, text: args.text }, activitySummary: `Inserted hyperlink to "${url}"` };
+    return {
+      success: true,
+      data: { url, text: args.text, targetText: args.targetText },
+      activitySummary: `Inserted hyperlink to "${url}"`,
+    };
   },
 };
 
@@ -4109,17 +4139,217 @@ export const redoDocumentOperationTool: ToolCatalogEntry = {
 // PLANNED TOOLS (Honest availability status)
 // ─────────────────────────────────────────────────────────────────────────────
 
+export const insertShapeTool: ToolCatalogEntry = {
+  id: 'insert_shape',
+  name: 'insert_shape',
+  label: 'Insert Vector Shape',
+  description:
+    'Insert a resizable vector shape (rectangle, rounded-rectangle, ellipse, triangle, diamond, star, arrow, double-arrow, block-arrow-right, callout, process, decision, banner, cloud, etc.) with optional inside text, fill, stroke, and text wrapping.',
+  category: 'content_creation',
+  workspace: ['doc'],
+  risk: 'modifying',
+  availability: 'implemented',
+  keywords: ['shape', 'rectangle', 'circle', 'ellipse', 'arrow', 'diamond', 'star', 'flowchart', 'diagram', 'banner'],
+  parameters: {
+    type: 'object',
+    properties: {
+      shapeType: {
+        type: 'string',
+        description:
+          'Shape preset: rectangle, rounded-rectangle, ellipse, triangle, right-triangle, diamond, pentagon, hexagon, octagon, cross, heart, cloud, star, star-4, banner, callout, oval-callout, line, arrow, left-arrow, double-arrow, block-arrow-right, block-arrow-left, block-arrow-up, block-arrow-down, connector, process, decision, terminator, document, data, database.',
+      },
+      text: { type: 'string', description: 'Optional label text inside the shape.' },
+      width: { type: 'number', description: 'Shape width in pixels (default 180).' },
+      height: { type: 'number', description: 'Shape height in pixels (default 110).' },
+      fill: { type: 'string', description: 'Fill hex color (e.g. #EAF2ED) or "transparent".' },
+      stroke: { type: 'string', description: 'Outline hex color (e.g. #245C45).' },
+      alignment: {
+        type: 'string',
+        enum: ['left', 'center', 'right', 'float-left', 'float-right'],
+        description: 'Alignment or text wrapping.',
+      },
+    },
+    required: ['shapeType'],
+  },
+  execute: async (args, context) => {
+    const val = validateActiveDoc(context);
+    if (!val.ok) return { success: false, error: val.error };
+    const shapeType = String(args.shapeType || 'rectangle');
+    const res = await editorRegistry.executeAction(
+      'insert_vector_shape',
+      {
+        shapeType,
+        text: args.text,
+        width: args.width,
+        height: args.height,
+        fill: args.fill,
+        stroke: args.stroke,
+        alignment: args.alignment || 'center',
+      },
+      val.docId
+    );
+    if (!res.success) return { success: false, error: res.error || 'Failed to insert shape.' };
+    return {
+      success: true,
+      data: { shapeType, text: args.text },
+      activitySummary: `Inserted ${shapeType} shape`,
+    };
+  },
+};
+
+export const insertTextBoxTool: ToolCatalogEntry = {
+  id: 'insert_text_box',
+  name: 'insert_text_box',
+  label: 'Insert Text Box',
+  description:
+    'Insert a styled, resizable Text Box (full-width banner, centered pull-quote box, or floating sidebar box with text wrapping).',
+  category: 'content_creation',
+  workspace: ['doc'],
+  risk: 'modifying',
+  availability: 'implemented',
+  keywords: ['textbox', 'text box', 'box', 'sidebar', 'pull quote', 'frame'],
+  parameters: {
+    type: 'object',
+    properties: {
+      text: { type: 'string', description: 'Text content inside the text box.' },
+      width: { type: 'number', description: 'Width in pixels (0 for full width, e.g. 240 for sidebar).' },
+      fill: { type: 'string', description: 'Background fill hex color (default #F8FAF9).' },
+      borderColor: { type: 'string', description: 'Border hex color (default #245C45).' },
+      borderStyle: { type: 'string', enum: ['solid', 'dashed', 'double', 'none'], description: 'Border line style.' },
+      alignment: {
+        type: 'string',
+        enum: ['full', 'left', 'center', 'right', 'float-left', 'float-right'],
+        description: 'Position or text-wrapping float mode.',
+      },
+    },
+    required: ['text'],
+  },
+  execute: async (args, context) => {
+    const val = validateActiveDoc(context);
+    if (!val.ok) return { success: false, error: val.error };
+    const text = String(args.text || '');
+    const res = await editorRegistry.executeAction(
+      'insert_text_box',
+      {
+        text,
+        width: args.width ?? 0,
+        fill: args.fill || '#F8FAF9',
+        borderColor: args.borderColor || '#245C45',
+        borderStyle: args.borderStyle || 'solid',
+        alignment: args.alignment || 'full',
+      },
+      val.docId
+    );
+    if (!res.success) return { success: false, error: res.error || 'Failed to insert text box.' };
+    return {
+      success: true,
+      data: { alignment: args.alignment || 'full' },
+      activitySummary: 'Inserted text box',
+    };
+  },
+};
+
+export const insertChartDocTool: ToolCatalogEntry = {
+  id: 'insert_chart',
+  name: 'insert_chart',
+  label: 'Insert Chart / Graph',
+  description:
+    'Render a high-resolution data chart or graph (column, bar, line, pie, or doughnut) directly onto the document page.',
+  category: 'content_creation',
+  workspace: ['doc'],
+  risk: 'modifying',
+  availability: 'implemented',
+  aliases: ['insert graph', 'create chart in document', 'add chart', 'plot graph'],
+  keywords: ['chart', 'graph', 'plot', 'bar chart', 'line chart', 'pie chart', 'visual'],
+  parameters: {
+    type: 'object',
+    properties: {
+      chartType: {
+        type: 'string',
+        enum: ['column', 'bar', 'line', 'pie', 'doughnut'],
+        description: 'Chart type (column, bar, line, pie, or doughnut).',
+      },
+      title: { type: 'string', description: 'Chart title.' },
+      subtitle: { type: 'string', description: 'Optional subtitle or unit label.' },
+      labels: {
+        type: 'array',
+        items: { type: 'string' },
+        description: 'Category labels (e.g. ["Gemini 1.0", "Gemini 1.5", "Gemini 2.5", "Gemini 4"]).',
+      },
+      values: {
+        type: 'array',
+        items: { type: 'number' },
+        description: 'Numeric values corresponding to each label.',
+      },
+      position: {
+        type: 'string',
+        enum: ['end', 'cursor', 'afterHeading'],
+        description: 'Where to insert the chart (defaults to "end").',
+      },
+      afterHeading: {
+        type: 'string',
+        description: 'Optional heading text to insert the chart directly after (when position is "afterHeading" or omitted).',
+      },
+    },
+    required: ['title', 'labels', 'values'],
+  },
+  execute: async (args, context) => {
+    const val = validateActiveDoc(context);
+    if (!val.ok) return { success: false, error: val.error };
+    const title = String(args.title || 'Chart');
+    const chartType = String(args.chartType || 'column');
+    const labels = Array.isArray(args.labels) ? args.labels.map(String) : [];
+    const values = Array.isArray(args.values) ? args.values.map(Number) : [];
+    if (labels.length === 0 || values.length === 0) {
+      return { success: false, error: 'labels and values arrays must be non-empty.' };
+    }
+    const res = await editorRegistry.executeAction(
+      'insert_chart',
+      {
+        chartType,
+        title,
+        subtitle: args.subtitle,
+        labels,
+        values,
+        position: args.position,
+        afterHeading: args.afterHeading,
+      },
+      val.docId
+    );
+    if (!res.success) return { success: false, error: res.error || 'Failed to insert chart.' };
+    return {
+      success: true,
+      data: { chartType, title, pointCount: Math.min(labels.length, values.length) },
+      activitySummary: `Inserted ${chartType} chart "${title}"`,
+    };
+  },
+};
+
 export const insertEquationPlannedTool: ToolCatalogEntry = {
   id: 'insert_equation',
   name: 'insert_equation',
   label: 'Insert Equation',
-  description: 'Insert LaTeX/KaTeX mathematical equation into document.',
+  description: 'Insert a mathematical equation or formula into the document.',
   category: 'content_creation',
   workspace: ['doc'],
   risk: 'modifying',
-  availability: 'planned',
-  parameters: { type: 'object', properties: {} },
-  execute: async () => ({ success: false, error: 'Mathematical equation editing is planned for a future release.' }),
+  availability: 'implemented',
+  parameters: {
+    type: 'object',
+    properties: {
+      latex: { type: 'string', description: 'Mathematical formula or LaTeX expression (e.g. "E = mc^2").' },
+    },
+    required: ['latex'],
+  },
+  execute: async (args, context) => {
+    const val = validateActiveDoc(context);
+    if (!val.ok) return { success: false, error: val.error };
+    const latex = String(args.latex || '').trim();
+    if (!latex) return { success: false, error: 'latex expression is required.' };
+    const res = await editorRegistry.executeAction('insert_equation', { latex }, val.docId);
+    if (!res.success) return { success: false, error: res.error || 'Failed to insert equation.' };
+    return { success: true, data: { latex }, activitySummary: `Inserted equation "${latex}"` };
+  },
 };
 
 export const insertFootnotePlannedTool: ToolCatalogEntry = {
@@ -4152,13 +4382,30 @@ export const insertWatermarkPlannedTool: ToolCatalogEntry = {
   id: 'insert_watermark',
   name: 'insert_watermark',
   label: 'Insert Watermark',
-  description: 'Insert a background watermark (e.g. DRAFT, CONFIDENTIAL).',
+  description: 'Set or clear a diagonal page watermark across all pages (e.g. DRAFT, CONFIDENTIAL, DO NOT COPY).',
   category: 'page_layout',
   workspace: ['doc'],
   risk: 'modifying',
-  availability: 'planned',
-  parameters: { type: 'object', properties: {} },
-  execute: async () => ({ success: false, error: 'Watermark configuration is planned for a future release.' }),
+  availability: 'implemented',
+  parameters: {
+    type: 'object',
+    properties: {
+      text: { type: 'string', description: 'Watermark text (e.g. "CONFIDENTIAL", "DRAFT", or "" to remove).' },
+    },
+    required: ['text'],
+  },
+  execute: async (args, context) => {
+    const val = validateActiveDoc(context);
+    if (!val.ok) return { success: false, error: val.error };
+    const text = String(args.text ?? '').trim();
+    const res = await editorRegistry.executeAction('modify_page_layout', { watermarkText: text }, val.docId);
+    if (!res.success) return { success: false, error: res.error || 'Failed to set watermark.' };
+    return {
+      success: true,
+      data: { watermarkText: text },
+      activitySummary: text ? `Set page watermark "${text}"` : 'Cleared page watermark',
+    };
+  },
 };
 
 export const insertBookmarkPlannedTool: ToolCatalogEntry = {
@@ -4174,11 +4421,44 @@ export const insertBookmarkPlannedTool: ToolCatalogEntry = {
   execute: async () => ({ success: false, error: 'Internal bookmarking is planned for a future release.' }),
 };
 
+export const renameDocumentTool: ToolCatalogEntry = {
+  id: 'rename_document',
+  name: 'rename_document',
+  label: 'Rename Workspace Document',
+  description: 'Rename the active workspace document title (also used as the default filename for PDF/Word exports).',
+  category: 'content_management',
+  workspace: ['doc'],
+  risk: 'modifying',
+  availability: 'implemented',
+  aliases: ['rename file', 'set document title', 'change workspace name', 'rename workspace'],
+  keywords: ['rename', 'title', 'workspace name', 'document name', 'filename'],
+  parameters: {
+    type: 'object',
+    properties: {
+      title: { type: 'string', description: 'New document / workspace title.' },
+    },
+    required: ['title'],
+  },
+  execute: async (args, context) => {
+    const val = validateActiveDoc(context);
+    if (!val.ok) return { success: false, error: val.error };
+    const title = String(args.title || '').trim();
+    if (!title) return { success: false, error: 'A non-empty title is required.' };
+    const res = await editorRegistry.executeAction('rename_current_document', { title }, val.docId);
+    if (!res.success) return { success: false, error: res.error || 'Failed to rename document.' };
+    return {
+      success: true,
+      data: { title },
+      activitySummary: `Renamed document to "${title}"`,
+    };
+  },
+};
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Complete Document Tool Catalog Array
 // ─────────────────────────────────────────────────────────────────────────────
 
-export const DOCUMENT_WORKSPACE_TOOLS: ToolCatalogEntry[] = [
+const RAW_DOCUMENT_WORKSPACE_TOOLS: ToolCatalogEntry[] = [
   // Creation
   insertParagraphTool,
   insertHeadingTool,
@@ -4195,6 +4475,10 @@ export const DOCUMENT_WORKSPACE_TOOLS: ToolCatalogEntry[] = [
   appendContentTool,
   prependContentTool,
   insertCalloutTool,
+  insertShapeTool,
+  insertTextBoxTool,
+  insertChartDocTool,
+  renameDocumentTool,
 
   // Transformations
   rewriteContentTool,
@@ -4334,3 +4618,80 @@ export const DOCUMENT_WORKSPACE_TOOLS: ToolCatalogEntry[] = [
   insertWatermarkPlannedTool,
   insertBookmarkPlannedTool,
 ];
+
+/**
+ * Wraps every modifying document workspace tool so that any direct call to
+ * `editorRegistry.executeAction` automatically dispatches an `editor_action` SSE event
+ * via `context.onEditorAction` and attaches `editorAction` to the returned `ToolResult`.
+ */
+export const DOCUMENT_WORKSPACE_TOOLS: ToolCatalogEntry[] = RAW_DOCUMENT_WORKSPACE_TOOLS.map((tool) => {
+  if (tool.risk === 'read_only') return tool;
+
+  const originalExecute = tool.execute;
+  return {
+    ...tool,
+    execute: async (args: Record<string, unknown>, context: ToolExecutionContext): Promise<ToolResult> => {
+      let capturedAction: {
+        actionId?: string;
+        action: string;
+        payload: Record<string, unknown>;
+        summary?: string;
+      } | null = null;
+      let dispatchedViaContext = false;
+
+      const wrappedContext: ToolExecutionContext = {
+        ...context,
+        onEditorAction: async (actionObj) => {
+          dispatchedViaContext = true;
+          capturedAction = actionObj;
+          if (context.onEditorAction) {
+            await context.onEditorAction(actionObj);
+          }
+        },
+      };
+
+      const origExecAction = editorRegistry.executeAction.bind(editorRegistry);
+      (editorRegistry as any).executeAction = async (
+        action: string,
+        payload: Record<string, unknown>,
+        documentId?: string,
+        onPersist?: any
+      ) => {
+        const docId = documentId || context.activeDocument?.id || context.workspaceId || '';
+        const actionId = `act-${action.slice(0, 8)}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+        const fullPayload = { ...payload, documentId: docId };
+        capturedAction = {
+          actionId,
+          action,
+          payload: fullPayload,
+          summary: `Executed ${tool.label}`,
+        };
+        return origExecAction(action, fullPayload, docId, onPersist);
+      };
+
+      try {
+        const result = await originalExecute(args, wrappedContext);
+        if (result.success && capturedAction && !dispatchedViaContext) {
+          const finalEditorAction = {
+            ...(capturedAction as {
+              actionId: string;
+              action: string;
+              payload: Record<string, unknown>;
+              summary?: string;
+            }),
+            summary: result.activitySummary || `Executed ${tool.label}`,
+          };
+          if (context.onEditorAction) {
+            await context.onEditorAction(finalEditorAction);
+          }
+          if (!result.editorAction) {
+            result.editorAction = finalEditorAction;
+          }
+        }
+        return result;
+      } finally {
+        (editorRegistry as any).executeAction = origExecAction;
+      }
+    },
+  };
+});

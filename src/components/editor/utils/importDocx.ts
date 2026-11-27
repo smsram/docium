@@ -1,16 +1,62 @@
 /**
  * Document Importer Utility
- * Parses incoming files (.docx, .md, .html, .txt) into clean HTML for Tiptap
+ * Parses incoming files (.docx via mammoth, .md, .html, .txt) into clean WYSIWYG HTML for Tiptap
+ * while preserving Word headings, alignment, underline, strikethrough, quotes, tables, and lists.
  */
+
+import mammoth from 'mammoth';
+import { convertMarkdownToDocumentHtml, escapeHtml } from './markdownToHtml';
+
+const DOCX_STYLE_MAP = [
+  "p[style-name='Title'] => h1:fresh",
+  "p[style-name='Subtitle'] => h2:fresh",
+  "p[style-name='Heading 1'] => h1:fresh",
+  "p[style-name='Heading 2'] => h2:fresh",
+  "p[style-name='Heading 3'] => h3:fresh",
+  "p[style-name='Heading 4'] => h4:fresh",
+  "p[style-name='Heading 5'] => h5:fresh",
+  "p[style-name='Heading 6'] => h6:fresh",
+  "p[style-name='Quote'] => blockquote:fresh",
+  "p[style-name='Intense Quote'] => blockquote:fresh",
+  "p[style-name='Code'] => pre:fresh",
+  "r[style-name='Strong'] => strong",
+  "r[style-name='Emphasis'] => em",
+  'u => u',
+  'strike => s',
+  'b => strong',
+  'i => em',
+];
+
+function injectDocxAlignmentStyles(html: string): string {
+  // Mammoth supports custom transformDocument alignment annotations when mapped,
+  // and we also normalize any align attributes into inline CSS text-align for Tiptap.
+  return html
+    .replace(/<(p|h[1-6])([^>]*)\salign="(center|right|justify|left)"([^>]*)>/gi, '<$1$2$4 style="text-align: $3;">')
+    .replace(/<p>\s*<\/p>/gi, '<p></p>');
+}
 
 export async function parseImportedFile(file: File): Promise<{ title: string; html: string }> {
   const fileName = file.name;
   const title = fileName.replace(/\.[^/.]+$/, '').replace(/[-_]/g, ' ');
   const extension = fileName.split('.').pop()?.toLowerCase();
 
+  if (extension === 'docx') {
+    const arrayBuffer = await file.arrayBuffer();
+    const result = await mammoth.convertToHtml(
+      { arrayBuffer },
+      {
+        styleMap: DOCX_STYLE_MAP,
+        includeDefaultStyleMap: true,
+      }
+    );
+    return {
+      title,
+      html: sanitizeImportedHtml(injectDocxAlignmentStyles(result.value || '<p></p>')),
+    };
+  }
+
   if (extension === 'html' || extension === 'htm') {
     const text = await file.text();
-    // Extract body content if present
     const bodyMatch = text.match(/<body[^>]*>([\s\S]*?)<\/body>/i);
     const content = bodyMatch ? bodyMatch[1] : text;
     return { title, html: sanitizeImportedHtml(content) };
@@ -18,7 +64,7 @@ export async function parseImportedFile(file: File): Promise<{ title: string; ht
 
   if (extension === 'md' || extension === 'markdown') {
     const text = await file.text();
-    return { title, html: markdownToHtml(text) };
+    return { title, html: convertMarkdownToDocumentHtml(text) };
   }
 
   if (extension === 'txt') {
@@ -30,72 +76,21 @@ export async function parseImportedFile(file: File): Promise<{ title: string; ht
     return { title, html: paragraphs || '<p></p>' };
   }
 
-  // Fallback for doc/docx or binary files: read as text or strip XML tags if Word XML
   const text = await file.text();
-  if (text.includes('<w:p') || text.includes('<html')) {
-    return { title, html: sanitizeImportedHtml(text) };
+  if (text.includes('<html') || text.includes('<body') || text.includes('<p')) {
+    const bodyMatch = text.match(/<body[^>]*>([\s\S]*?)<\/body>/i);
+    return { title, html: sanitizeImportedHtml(bodyMatch ? bodyMatch[1] : text) };
   }
 
   return {
     title,
-    html: `<p>${escapeHtml(text.slice(0, 10000))}</p>`,
+    html: `<p>${escapeHtml(text.slice(0, 15000))}</p>`,
   };
 }
 
-function markdownToHtml(md: string): string {
-  return md
-    .split(/\r?\n\r?\n/)
-    .map((block) => {
-      const trimmed = block.trim();
-      if (!trimmed) return '';
-      if (trimmed.startsWith('# ')) return `<h1>${escapeHtml(trimmed.slice(2))}</h1>`;
-      if (trimmed.startsWith('## ')) return `<h2>${escapeHtml(trimmed.slice(3))}</h2>`;
-      if (trimmed.startsWith('### ')) return `<h3>${escapeHtml(trimmed.slice(4))}</h3>`;
-      if (trimmed.startsWith('#### ')) return `<h4>${escapeHtml(trimmed.slice(5))}</h4>`;
-      if (trimmed.startsWith('> ')) return `<blockquote>${escapeHtml(trimmed.slice(2))}</blockquote>`;
-      if (trimmed.startsWith('---') || trimmed.startsWith('***')) {
-        return `<div data-type="page-break" class="docium-page-break"></div>`;
-      }
-      if (trimmed.startsWith('- ') || trimmed.startsWith('* ')) {
-        const items = trimmed
-          .split(/\r?\n/)
-          .map((line) => `<li>${escapeHtml(line.replace(/^[-*]\s*/, ''))}</li>`)
-          .join('');
-        return `<ul>${items}</ul>`;
-      }
-      if (/^\d+\.\s/.test(trimmed)) {
-        const items = trimmed
-          .split(/\r?\n/)
-          .map((line) => `<li>${escapeHtml(line.replace(/^\d+\.\s*/, ''))}</li>`)
-          .join('');
-        return `<ol>${items}</ol>`;
-      }
-      // Inline styling replacement
-      const formatted = escapeHtml(trimmed)
-        .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
-        .replace(/\*(.*?)\*/g, '<em>$1</em>')
-        .replace(/`([^`]+)`/g, '<code>$1</code>');
-      return `<p>${formatted}</p>`;
-    })
-    .join('');
-}
-
 function sanitizeImportedHtml(html: string): string {
-  // Strip out head, script, style, comments
-  const clean = html
+  return html
     .replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, '')
     .replace(/<style\b[^<]*(?:(?!<\/style>)<[^<]*)*<\/style>/gi, '')
     .replace(/<!--[\s\S]*?-->/g, '');
-
-  return clean;
 }
-
-function escapeHtml(str: string): string {
-  return str
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#039;');
-}
-

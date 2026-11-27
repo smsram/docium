@@ -2,6 +2,7 @@
 
 import React, { useState } from 'react';
 import { Table as TableIcon } from 'lucide-react';
+import { InputDialog } from '@/components/ui/InputDialog';
 
 interface TableGridPickerProps {
   onSelectDimensions: (rows: number, cols: number) => void;
@@ -11,6 +12,7 @@ interface TableGridPickerProps {
 export function TableGridPicker({ onSelectDimensions, onClose }: TableGridPickerProps) {
   const [hoveredRow, setHoveredRow] = useState(0);
   const [hoveredCol, setHoveredCol] = useState(0);
+  const [customOpen, setCustomOpen] = useState(false);
 
   const maxRows = 10;
   const maxCols = 10;
@@ -66,19 +68,32 @@ export function TableGridPicker({ onSelectDimensions, onClose }: TableGridPicker
         <span>Click to insert table</span>
         <button
           type="button"
-          onClick={() => {
-            const rows = parseInt(prompt('Enter number of rows:', '4') || '4', 10);
-            const cols = parseInt(prompt('Enter number of columns:', '4') || '4', 10);
-            if (rows > 0 && cols > 0) {
-              onSelectDimensions(rows, cols);
-              onClose();
-            }
-          }}
-          className="text-[var(--primary)] font-medium hover:underline"
+          onClick={() => setCustomOpen(true)}
+          className="text-[var(--primary)] font-medium hover:underline cursor-pointer"
         >
           Custom size...
         </button>
       </div>
+
+      <InputDialog
+        isOpen={customOpen}
+        title="Insert Custom Table"
+        fields={[
+          { id: 'rows', label: 'Number of Rows', type: 'number', defaultValue: '4' },
+          { id: 'cols', label: 'Number of Columns', type: 'number', defaultValue: '4' },
+        ]}
+        confirmLabel="Insert Table"
+        onConfirm={(vals) => {
+          const rows = parseInt(vals.rows || '4', 10);
+          const cols = parseInt(vals.cols || '4', 10);
+          if (rows > 0 && cols > 0) {
+            onSelectDimensions(Math.min(50, rows), Math.min(20, cols));
+            setCustomOpen(false);
+            onClose();
+          }
+        }}
+        onCancel={() => setCustomOpen(false)}
+      />
     </div>
   );
 }

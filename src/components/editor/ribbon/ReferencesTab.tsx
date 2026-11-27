@@ -1,6 +1,6 @@
 'use client';
 
-import React from 'react';
+import React, { useState } from 'react';
 import { type Editor } from '@tiptap/react';
 import {
   ListTree,
@@ -12,6 +12,7 @@ import {
   Link2,
 } from 'lucide-react';
 import { DocumentCitation } from '@/lib/types';
+import { InputDialog } from '@/components/ui/InputDialog';
 
 interface ReferencesTabProps {
   editor: Editor | null;
@@ -19,11 +20,15 @@ interface ReferencesTabProps {
   onOpenCitationModal: () => void;
 }
 
+type RefPromptMode = 'footnote' | 'endnote' | 'caption' | 'crossref' | null;
+
 export function ReferencesTab({
   editor,
   citations,
   onOpenCitationModal,
 }: ReferencesTabProps) {
+  const [refDialog, setRefDialog] = useState<RefPromptMode>(null);
+
   if (!editor) return null;
 
   // Insert Table of Contents block generated from document headings
@@ -99,54 +104,43 @@ export function ReferencesTab({
     editor.chain().focus().insertContent(bibHtml).run();
   };
 
-  const handleInsertFootnote = () => {
-    const noteText = prompt('Enter footnote text:');
-    if (noteText) {
-      editor
-        .chain()
-        .focus()
-        .insertContent(`<sup>[<span title="${noteText}">*</span>]</sup> `)
-        .run();
-    }
-  };
+  const handleInsertFootnote = () => setRefDialog('footnote');
+  const handleInsertEndnote = () => setRefDialog('endnote');
+  const handleInsertCaption = () => setRefDialog('caption');
+  const handleInsertCrossReference = () => setRefDialog('crossref');
 
-  const handleInsertEndnote = () => {
-    const noteText = prompt('Enter endnote text:');
-    if (noteText) {
+  const handleConfirmRefDialog = (values: Record<string, string>) => {
+    const val = (values.text || '').trim();
+    if (!val) {
+      setRefDialog(null);
+      return;
+    }
+    if (refDialog === 'footnote') {
+      editor.chain().focus().insertContent(`<sup>[<span title="${val}">*</span>]</sup> `).run();
+    } else if (refDialog === 'endnote') {
+      editor.chain().focus().insertContent(`<sup>[i]</sup> `).run();
       editor
         .chain()
         .focus()
-        .insertContent(`<sup>[i]</sup> `)
+        .insertContentAt(
+          editor.state.doc.content.size,
+          `<p class="text-[11px] text-[var(--text-muted)] mt-4"><em>[i] ${val}</em></p>`
+        )
         .run();
-      // Append note at document bottom
+    } else if (refDialog === 'caption') {
       editor
         .chain()
         .focus()
-        .insertContentAt(editor.state.doc.content.size, `<p class="text-[11px] text-[var(--text-muted)] mt-4"><em>[i] ${noteText}</em></p>`)
+        .insertContent(`<p class="text-center text-[11px] italic text-[var(--text-muted)] my-1">Figure: ${val}</p>`)
+        .run();
+    } else if (refDialog === 'crossref') {
+      editor
+        .chain()
+        .focus()
+        .insertContent(`<a href="#" class="text-[var(--primary)] font-medium underline">${val}</a> `)
         .run();
     }
-  };
-
-  const handleInsertCaption = () => {
-    const caption = prompt('Enter figure or table caption:');
-    if (caption) {
-      editor
-        .chain()
-        .focus()
-        .insertContent(`<p class="text-center text-[11px] italic text-[var(--text-muted)] my-1">Figure: ${caption}</p>`)
-        .run();
-    }
-  };
-
-  const handleInsertCrossReference = () => {
-    const refText = prompt('Enter cross-reference label (e.g. "See Section 2.1"):', 'See Section 1');
-    if (refText) {
-      editor
-        .chain()
-        .focus()
-        .insertContent(`<a href="#" class="text-[var(--primary)] font-medium underline">${refText}</a> `)
-        .run();
-    }
+    setRefDialog(null);
   };
 
   return (
@@ -232,6 +226,37 @@ export function ReferencesTab({
           <span>Cross-Ref</span>
         </button>
       </div>
+
+      <InputDialog
+        isOpen={refDialog !== null}
+        title={
+          refDialog === 'footnote'
+            ? 'Insert Footnote'
+            : refDialog === 'endnote'
+            ? 'Insert Endnote'
+            : refDialog === 'caption'
+            ? 'Insert Figure / Table Caption'
+            : 'Insert Cross-Reference'
+        }
+        fields={[
+          {
+            id: 'text',
+            label:
+              refDialog === 'footnote'
+                ? 'Footnote text'
+                : refDialog === 'endnote'
+                ? 'Endnote text'
+                : refDialog === 'caption'
+                ? 'Caption text'
+                : 'Cross-reference label',
+            defaultValue: refDialog === 'crossref' ? 'See Section 1' : '',
+            placeholder: refDialog === 'caption' ? 'e.g. Architecture overview' : 'Enter text...',
+          },
+        ]}
+        confirmLabel="Insert"
+        onConfirm={handleConfirmRefDialog}
+        onCancel={() => setRefDialog(null)}
+      />
     </div>
   );
 }

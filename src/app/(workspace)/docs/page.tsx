@@ -68,7 +68,7 @@ export default function DocsPage() {
             <div
               key={i}
               onClick={() => {
-                const id = createDocument('doc', tpl.title);
+                const id = createDocument('doc', tpl.title === 'Blank Document' ? 'Untitled Document' : tpl.title, '<p></p>');
                 router.push(`/workspace/${id}`);
               }}
               className="flex items-center justify-between rounded-xl border border-[var(--border)] bg-[var(--surface)] p-3.5 hover:border-[var(--primary)] hover:bg-[var(--accent)] cursor-pointer transition-all shadow-2xs group"

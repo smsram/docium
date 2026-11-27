@@ -4,15 +4,11 @@ import React, { useState, useRef, useMemo, useCallback, useEffect } from 'react'
 import { Minimize2 } from 'lucide-react';
 import { useEditor } from '@tiptap/react';
 import StarterKit from '@tiptap/starter-kit';
-import { Table } from '@tiptap/extension-table';
 import { TableRow } from '@tiptap/extension-table-row';
-import { TableHeader } from '@tiptap/extension-table-header';
-import { TableCell } from '@tiptap/extension-table-cell';
 import TextAlign from '@tiptap/extension-text-align';
 import Highlight from '@tiptap/extension-highlight';
 import { TextStyle } from '@tiptap/extension-text-style';
 import { Color } from '@tiptap/extension-color';
-import Image from '@tiptap/extension-image';
 import TaskList from '@tiptap/extension-task-list';
 import TaskItem from '@tiptap/extension-task-item';
 
@@ -43,12 +39,22 @@ import {
   Superscript,
   ShapeNode,
   ShapeType,
+  TextBox,
+  ResizableImage,
+  CustomTable,
+  CustomTableCell,
+  CustomTableHeader,
+  CustomBlockquote,
+  CustomCodeBlock,
+  Indent,
+  EquationNode,
+  InlineEquationNode,
 } from './extensions';
 
 // Subcomponents
 import { DocumentTopBar } from './DocumentTopBar';
 import { RibbonContainer } from './ribbon/RibbonContainer';
-import { DocumentRuler } from './ruler/DocumentRuler';
+import { DocumentRuler, VerticalRuler } from './ruler/DocumentRuler';
 import { PaginatedCanvas } from './canvas/PaginatedCanvas';
 import { DocumentOutline } from './DocumentOutline';
 import { CommentsSidebar } from './comments/CommentsSidebar';
@@ -61,6 +67,9 @@ import { DocumentStatsModal } from './modals/DocumentStatsModal';
 import { CitationModal } from './modals/CitationModal';
 import { LinkModal } from './modals/LinkModal';
 import { VersionHistoryModal } from './modals/VersionHistoryModal';
+import { ChartModal } from './modals/ChartModal';
+import { DrawingModal } from './modals/DrawingModal';
+import { EquationModal } from './modals/EquationModal';
 
 // Utilities
 import {
@@ -75,7 +84,7 @@ import {
   exportToHtml,
   exportToPlainText,
 } from './utils/exportDocx';
-import { triggerPrintPdf } from './utils/exportPdf';
+import { exportToPdf, triggerPrintPdf } from './utils/exportPdf';
 import { parseImportedFile } from './utils/importDocx';
 
 interface DocumentEditorProps {
@@ -111,10 +120,22 @@ export function DocumentEditor({ documentId, showBackToHome = false }: DocumentE
   const [columns, setColumns] = useState<1 | 2 | 3>(doc?.columns || 1);
   const [headerText, setHeaderText] = useState(doc?.headerText || '');
   const [footerText, setFooterText] = useState(doc?.footerText || '');
+  const [headerAlign, setHeaderAlign] = useState<'left' | 'center' | 'right'>(doc?.headerAlign || 'left');
+  const [footerAlign, setFooterAlign] = useState<'left' | 'center' | 'right'>(doc?.footerAlign || 'left');
   const [firstPageHeaderText, setFirstPageHeaderText] = useState(doc?.firstPageHeaderText || '');
   const [firstPageFooterText, setFirstPageFooterText] = useState(doc?.firstPageFooterText || '');
-  const [showPageNumbers, setShowPageNumbers] = useState(doc?.showPageNumbers ?? true);
+  const [showPageNumbers, setShowPageNumbers] = useState(doc?.showPageNumbers ?? false);
   const [differentFirstPage, setDifferentFirstPage] = useState(doc?.differentFirstPage ?? false);
+  const [watermarkText, setWatermarkText] = useState(doc?.watermarkText || '');
+  const [pageColor, setPageColor] = useState(doc?.pageColor || '#FFFFFF');
+  const [pageBorder, setPageBorder] = useState<'none' | 'box' | 'shadow' | 'double' | 'accent'>(
+    doc?.pageBorder || 'none'
+  );
+  const [pageBorderColor, setPageBorderColor] = useState(doc?.pageBorderColor || '#1e293b');
+  const [pageBorderWidth, setPageBorderWidth] = useState(doc?.pageBorderWidth || 1);
+  const [pageBorderOffset, setPageBorderOffset] = useState<'edge' | 'margin' | 'wide'>(
+    doc?.pageBorderOffset || 'edge'
+  );
 
   // Review & Comments state
   const [comments, setComments] = useState<DocumentComment[]>(doc?.comments || []);
@@ -143,49 +164,141 @@ export function DocumentEditor({ documentId, showBackToHome = false }: DocumentE
   } | null>(null);
 
   const handleToggleFocusMode = useCallback((target?: boolean) => {
-    setIsFocusMode((prev) => {
-      const next = target !== undefined ? target : !prev;
-      if (next && !prev) {
-        // Entering Focus Mode: remember states
-        savedStateBeforeFocusRef.current = {
-          outline: outlinePanelOpen,
-          comments: commentsSidebarOpen,
-          ai: getAiPanelState(documentId).mode,
-        };
-        // Close distractions
-        setOutlinePanelOpen(false);
-        setCommentsSidebarOpen(false);
-        updateAiPanelState(documentId, { mode: 'minimized' });
-      } else if (!next && prev) {
-        // Exiting Focus Mode: restore states
-        if (savedStateBeforeFocusRef.current) {
-          setOutlinePanelOpen(savedStateBeforeFocusRef.current.outline);
-          setCommentsSidebarOpen(savedStateBeforeFocusRef.current.comments);
-          updateAiPanelState(documentId, { mode: savedStateBeforeFocusRef.current.ai });
-        }
-      }
-      return next;
-    });
-  }, [documentId, getAiPanelState, outlinePanelOpen, commentsSidebarOpen, setOutlinePanelOpen, updateAiPanelState]);
+    const next = target !== undefined ? target : !isFocusMode;
+    if (next === isFocusMode) return;
 
-  // Global keyboard shortcuts for focus mode: Escape exits, Mod+Shift+F toggles
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && isFocusMode) {
-        e.preventDefault();
-        handleToggleFocusMode(false);
-      } else if ((e.ctrlKey || e.metaKey) && e.shiftKey && (e.key === 'f' || e.key === 'F')) {
-        e.preventDefault();
-        handleToggleFocusMode();
-      }
-    };
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [isFocusMode, handleToggleFocusMode]);
+    setIsFocusMode(next);
 
-  // Format painter state
+    if (next) {
+      // Entering Focus Mode: remember states
+      savedStateBeforeFocusRef.current = {
+        outline: outlinePanelOpen,
+        comments: commentsSidebarOpen,
+        ai: getAiPanelState(documentId).mode,
+      };
+      // Close distractions outside render phase updater
+      setOutlinePanelOpen(false);
+      setCommentsSidebarOpen(false);
+      updateAiPanelState(documentId, { mode: 'minimized' });
+    } else {
+      // Exiting Focus Mode: restore states
+      if (savedStateBeforeFocusRef.current) {
+        setOutlinePanelOpen(savedStateBeforeFocusRef.current.outline);
+        setCommentsSidebarOpen(savedStateBeforeFocusRef.current.comments);
+        updateAiPanelState(documentId, { mode: savedStateBeforeFocusRef.current.ai });
+      }
+    }
+  }, [isFocusMode, documentId, getAiPanelState, outlinePanelOpen, commentsSidebarOpen, setOutlinePanelOpen, updateAiPanelState]);
+
+  // Global keyboard shortcuts: Focus Mode, Find & Replace (Ctrl+F), Unified Undo/Redo
   const [formatPainterActive, setFormatPainterActive] = useState(false);
-  const [copiedMarks, setCopiedMarks] = useState<Record<string, Record<string, unknown>> | null>(null);
+  const [copiedFormatting, setCopiedFormatting] = useState<{
+    marks: Record<string, Record<string, unknown>>;
+    blockAttrs?: { textAlign?: string | null; lineHeight?: string | null };
+  } | null>(null);
+
+  type LayoutSnapshot = {
+    pageSize: DocumentPageSize;
+    orientation: DocumentOrientation;
+    marginPreset: MarginPreset;
+    margins: DocumentMargins;
+    columns: 1 | 2 | 3;
+    headerText: string;
+    footerText: string;
+    headerAlign: 'left' | 'center' | 'right';
+    footerAlign: 'left' | 'center' | 'right';
+    firstPageHeaderText: string;
+    firstPageFooterText: string;
+    showPageNumbers: boolean;
+    differentFirstPage: boolean;
+    watermarkText: string;
+    pageColor: string;
+    pageBorder: 'none' | 'box' | 'shadow' | 'double' | 'accent';
+    pageBorderColor: string;
+    pageBorderWidth: number;
+    pageBorderOffset: 'edge' | 'margin' | 'wide';
+  };
+  const layoutUndoRef = useRef<LayoutSnapshot[]>([]);
+  const layoutRedoRef = useRef<LayoutSnapshot[]>([]);
+  const [layoutHistoryTick, setLayoutHistoryTick] = useState(0);
+
+  const captureLayoutSnapshot = useCallback(
+    (): LayoutSnapshot => ({
+      pageSize,
+      orientation,
+      marginPreset,
+      margins,
+      columns,
+      headerText,
+      footerText,
+      headerAlign,
+      footerAlign,
+      firstPageHeaderText,
+      firstPageFooterText,
+      showPageNumbers,
+      differentFirstPage,
+      watermarkText,
+      pageColor,
+      pageBorder,
+      pageBorderColor,
+      pageBorderWidth,
+      pageBorderOffset,
+    }),
+    [
+      pageSize,
+      orientation,
+      marginPreset,
+      margins,
+      columns,
+      headerText,
+      footerText,
+      headerAlign,
+      footerAlign,
+      firstPageHeaderText,
+      firstPageFooterText,
+      showPageNumbers,
+      differentFirstPage,
+      watermarkText,
+      pageColor,
+      pageBorder,
+      pageBorderColor,
+      pageBorderWidth,
+      pageBorderOffset,
+    ]
+  );
+
+  const applyLayoutSnapshot = useCallback(
+    (snap: LayoutSnapshot) => {
+      setPageSize(snap.pageSize);
+      setOrientation(snap.orientation);
+      setMarginPreset(snap.marginPreset);
+      setMargins(snap.margins);
+      setColumns(snap.columns);
+      setHeaderText(snap.headerText);
+      setFooterText(snap.footerText);
+      setHeaderAlign(snap.headerAlign);
+      setFooterAlign(snap.footerAlign);
+      setFirstPageHeaderText(snap.firstPageHeaderText);
+      setFirstPageFooterText(snap.firstPageFooterText);
+      setShowPageNumbers(snap.showPageNumbers);
+      setDifferentFirstPage(snap.differentFirstPage);
+      setWatermarkText(snap.watermarkText);
+      setPageColor(snap.pageColor);
+      setPageBorder(snap.pageBorder);
+      setPageBorderColor(snap.pageBorderColor);
+      setPageBorderWidth(snap.pageBorderWidth);
+      setPageBorderOffset(snap.pageBorderOffset);
+      updateDocument(documentId, snap);
+    },
+    [documentId, updateDocument]
+  );
+
+  const recordLayoutUndoPoint = useCallback(() => {
+    layoutUndoRef.current.push(captureLayoutSnapshot());
+    if (layoutUndoRef.current.length > 40) layoutUndoRef.current.shift();
+    layoutRedoRef.current = [];
+    setLayoutHistoryTick((t) => t + 1);
+  }, [captureLayoutSnapshot]);
 
   // Modals state
   const [pageSetupModalOpen, setPageSetupModalOpen] = useState(false);
@@ -193,6 +306,9 @@ export function DocumentEditor({ documentId, showBackToHome = false }: DocumentE
   const [citationModalOpen, setCitationModalOpen] = useState(false);
   const [linkModalOpen, setLinkModalOpen] = useState(false);
   const [versionHistoryModalOpen, setVersionHistoryModalOpen] = useState(false);
+  const [chartModalOpen, setChartModalOpen] = useState(false);
+  const [drawingModalOpen, setDrawingModalOpen] = useState(false);
+  const [equationModalOpen, setEquationModalOpen] = useState(false);
 
   // Context Menu State
   const [contextMenuState, setContextMenuState] = useState<ContextMenuState>({
@@ -213,79 +329,130 @@ export function DocumentEditor({ documentId, showBackToHome = false }: DocumentE
   const editor = useEditor({
     extensions: [
       StarterKit.configure({
-        heading: { levels: [1, 2, 3, 4] },
+        blockquote: false,
+        codeBlock: false,
+        heading: { levels: [1, 2, 3, 4, 5, 6] },
         link: {
           openOnClick: false,
         },
       }),
-      Table.configure({
+      CustomBlockquote,
+      CustomCodeBlock,
+      CustomTable.configure({
         resizable: true,
+        handleWidth: 6,
+        cellMinWidth: 40,
       }),
       TableRow,
-      TableHeader,
-      TableCell,
+      CustomTableHeader,
+      CustomTableCell,
       TextStyle,
       Color,
       TextAlign.configure({
         types: ['heading', 'paragraph'],
       }),
       Highlight.configure({ multicolor: true }),
-      Image.configure({
-        inline: true,
+      ResizableImage.configure({
         allowBase64: true,
       }),
       TaskList,
       TaskItem.configure({
         nested: true,
       }),
-      // Custom extensions
+      // Custom Word / Google Docs extensions
       PageBreak,
-  SectionBreak,
+      SectionBreak,
       Callout,
       FontSize,
       FontFamily,
       LineHeight,
+      Indent,
       Subscript,
       Superscript,
       ShapeNode,
+      TextBox,
+      EquationNode,
+      InlineEquationNode,
     ],
     content: doc?.contentJson || (doc?.content !== undefined ? doc.content : '<p></p>'),
     immediatelyRender: false,
     editorProps: {
       attributes: {
-        class: 'tiptap focus:outline-none min-h-[500px] leading-relaxed',
+        class: 'tiptap focus:outline-none min-h-[500px]',
         spellcheck: spellCheckEnabled ? 'true' : 'false',
       },
-      handleClick: (view, pos) => {
-        // If format painter is active, apply copied marks to clicked text
-        if (formatPainterActive && copiedMarks) {
+      handleDOMEvents: {
+        mouseup: (view) => {
+          if (!formatPainterActive || !copiedFormatting) return false;
           const { state, dispatch } = view;
+          const { from, to, empty } = state.selection;
+          let targetFrom = from;
+          let targetTo = to;
+
+          if (empty) {
+            // Single click: find word boundaries around cursor
+            const $pos = state.doc.resolve(from);
+            const parentText = $pos.parent.textContent;
+            const offsetInParent = $pos.parentOffset;
+            let startWord = offsetInParent;
+            let endWord = offsetInParent;
+            while (startWord > 0 && !/\s/.test(parentText[startWord - 1])) startWord--;
+            while (endWord < parentText.length && !/\s/.test(parentText[endWord])) endWord++;
+            const blockStart = $pos.start();
+            targetFrom = blockStart + startWord;
+            targetTo = blockStart + endWord;
+          }
+
           const tr = state.tr;
-          // Apply marks across the node or word at click position
-          const resolvedPos = state.doc.resolve(pos);
-          const range = { from: resolvedPos.start(), to: resolvedPos.end() };
-          Object.entries(copiedMarks).forEach(([markName, markAttrs]) => {
-            const markType = state.schema.marks[markName];
-            if (markType) {
-              tr.addMark(range.from, range.to, markType.create(markAttrs));
-            }
-          });
+          if (targetTo > targetFrom) {
+            // Clear all existing inline marks first so formatting matches cleanly
+            Object.values(state.schema.marks).forEach((markType) => {
+              tr.removeMark(targetFrom, targetTo, markType);
+            });
+            Object.entries(copiedFormatting.marks).forEach(([markName, markAttrs]) => {
+              const markType = state.schema.marks[markName];
+              if (markType) {
+                tr.addMark(targetFrom, targetTo, markType.create(markAttrs));
+              }
+            });
+          }
+
+          if (copiedFormatting.blockAttrs) {
+            const { textAlign, lineHeight } = copiedFormatting.blockAttrs;
+            state.doc.nodesBetween(from, to, (node, pos) => {
+              if (node.type.name === 'paragraph' || node.type.name === 'heading') {
+                tr.setNodeMarkup(pos, undefined, {
+                  ...node.attrs,
+                  ...(textAlign !== undefined ? { textAlign } : {}),
+                  ...(lineHeight !== undefined ? { lineHeight } : {}),
+                });
+              }
+            });
+          }
+
           dispatch(tr);
           setFormatPainterActive(false);
-          setCopiedMarks(null);
-          return true;
-        }
-        return false;
+          setCopiedFormatting(null);
+          return false;
+        },
       },
     },
-    onUpdate: ({ editor }) => {
+    onUpdate: ({ editor: activeEd }) => {
       setSaveStatus('saving');
       if (debounceTimerRef.current) clearTimeout(debounceTimerRef.current);
 
       debounceTimerRef.current = setTimeout(() => {
-        const html = editor.getHTML();
-        const json = editor.getJSON();
-        const text = editor.getText();
+        if (!activeEd || activeEd.isDestroyed || !activeEd.view) return;
+        let html = '';
+        let json: Record<string, unknown> = {};
+        let text = '';
+        try {
+          html = activeEd.getHTML();
+          json = activeEd.getJSON() as Record<string, unknown>;
+          text = activeEd.getText();
+        } catch {
+          return;
+        }
         const wordCount = text.trim() ? text.trim().split(/\s+/).length : 0;
         const characterCount = text.length;
         const readingTime = Math.max(1, Math.ceil(wordCount / 200));
@@ -307,6 +474,9 @@ export function DocumentEditor({ documentId, showBackToHome = false }: DocumentE
           firstPageFooterText,
           showPageNumbers,
           differentFirstPage,
+          watermarkText,
+          pageColor,
+          pageBorder,
           comments,
           citations,
           versionHistory,
@@ -316,6 +486,72 @@ export function DocumentEditor({ documentId, showBackToHome = false }: DocumentE
       }, 700);
     },
   });
+
+  // Clean up debounce timer on unmount to prevent null editor.view crash
+  useEffect(() => {
+    return () => {
+      if (debounceTimerRef.current) {
+        clearTimeout(debounceTimerRef.current);
+        debounceTimerRef.current = null;
+      }
+    };
+  }, []);
+
+  const handleUnifiedUndo = useCallback(() => {
+    if (editor && !editor.isDestroyed && editor.can().undo()) {
+      editor.chain().focus().undo().run();
+      return;
+    }
+    if (layoutUndoRef.current.length > 0) {
+      const prev = layoutUndoRef.current.pop()!;
+      layoutRedoRef.current.push(captureLayoutSnapshot());
+      applyLayoutSnapshot(prev);
+      setLayoutHistoryTick((t) => t + 1);
+    }
+  }, [editor, captureLayoutSnapshot, applyLayoutSnapshot]);
+
+  const handleUnifiedRedo = useCallback(() => {
+    if (editor && !editor.isDestroyed && editor.can().redo()) {
+      editor.chain().focus().redo().run();
+      return;
+    }
+    if (layoutRedoRef.current.length > 0) {
+      const next = layoutRedoRef.current.pop()!;
+      layoutUndoRef.current.push(captureLayoutSnapshot());
+      applyLayoutSnapshot(next);
+      setLayoutHistoryTick((t) => t + 1);
+    }
+  }, [editor, captureLayoutSnapshot, applyLayoutSnapshot]);
+
+  // Global keyboard shortcuts: Escape Focus Mode, Ctrl+Shift+F, Ctrl+F Find & Replace, Ctrl+Z / Ctrl+Y Unified Undo/Redo
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      const mod = e.ctrlKey || e.metaKey;
+      if (e.key === 'Escape' && isFocusMode) {
+        e.preventDefault();
+        handleToggleFocusMode(false);
+      } else if (mod && e.shiftKey && e.key.toLowerCase() === 'f') {
+        e.preventDefault();
+        handleToggleFocusMode();
+      } else if (mod && !e.shiftKey && e.key.toLowerCase() === 'f') {
+        e.preventDefault();
+        if (isFocusMode) handleToggleFocusMode(false);
+        window.dispatchEvent(new CustomEvent('docium:open-find-replace'));
+      } else if (mod && !e.shiftKey && e.key.toLowerCase() === 'z') {
+        if (!editor?.isFocused && layoutUndoRef.current.length > 0) {
+          e.preventDefault();
+          handleUnifiedUndo();
+        }
+      } else if (mod && (e.key.toLowerCase() === 'y' || (e.shiftKey && e.key.toLowerCase() === 'z'))) {
+        if (!editor?.isFocused && layoutRedoRef.current.length > 0) {
+          e.preventDefault();
+          handleUnifiedRedo();
+        }
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [isFocusMode, handleToggleFocusMode, editor, handleUnifiedUndo, handleUnifiedRedo]);
 
   // Register editor in central EditorRegistry with StrictMode remount safety
   useEffect(() => {
@@ -467,15 +703,37 @@ export function DocumentEditor({ documentId, showBackToHome = false }: DocumentE
     if (!editor) return;
     if (formatPainterActive) {
       setFormatPainterActive(false);
-      setCopiedMarks(null);
+      setCopiedFormatting(null);
     } else {
-      // Capture marks at current selection
-      const marks = editor.state.selection.$from.marks();
+      const { from, to, empty, $from } = editor.state.selection;
       const markMap: Record<string, Record<string, unknown>> = {};
-      marks.forEach((m) => {
-        markMap[m.type.name] = m.attrs;
+
+      if (!empty) {
+        editor.state.doc.nodesBetween(from, to, (node) => {
+          if (node.isText && node.marks.length > 0 && Object.keys(markMap).length === 0) {
+            node.marks.forEach((m) => {
+              markMap[m.type.name] = { ...m.attrs };
+            });
+          }
+        });
+      }
+      if (Object.keys(markMap).length === 0) {
+        const activeMarks =
+          editor.state.storedMarks ||
+          ($from.marks().length > 0 ? $from.marks() : $from.nodeBefore?.marks || []);
+        activeMarks.forEach((m) => {
+          markMap[m.type.name] = { ...m.attrs };
+        });
+      }
+
+      const parentAttrs = $from.parent.attrs || {};
+      setCopiedFormatting({
+        marks: markMap,
+        blockAttrs: {
+          textAlign: parentAttrs.textAlign ?? null,
+          lineHeight: parentAttrs.lineHeight ?? null,
+        },
       });
-      setCopiedMarks(markMap);
       setFormatPainterActive(true);
     }
   };
@@ -725,8 +983,38 @@ export function DocumentEditor({ documentId, showBackToHome = false }: DocumentE
               mode: isAiDocked ? 'minimized' : 'docked',
             });
           }}
-          onExportDocx={() => editor && exportToDocx(title, editor.getHTML())}
+          onUndo={handleUnifiedUndo}
+          onRedo={handleUnifiedRedo}
+          canUndo={Boolean(editor?.can().undo()) || (layoutHistoryTick >= 0 && layoutUndoRef.current.length > 0)}
+          canRedo={Boolean(editor?.can().redo()) || (layoutHistoryTick >= 0 && layoutRedoRef.current.length > 0)}
+          onExportDocx={() =>
+            editor &&
+            exportToDocx(title, editor.getHTML(), {
+              jsonContent: editor.getJSON(),
+              pageSize,
+              orientation,
+              margins,
+              columns,
+              headerText,
+              footerText,
+              firstPageHeaderText,
+              firstPageFooterText,
+              showPageNumbers,
+              differentFirstPage,
+              watermarkText,
+              pageColor,
+              pageBorder,
+            })
+          }
           onExportPdf={() =>
+            void exportToPdf(title, {
+              pageSize,
+              orientation,
+              margins,
+              pageColor,
+            })
+          }
+          onPrint={() =>
             triggerPrintPdf({
               title,
               pageSize,
@@ -753,33 +1041,82 @@ export function DocumentEditor({ documentId, showBackToHome = false }: DocumentE
           marginPreset={marginPreset}
           margins={margins}
           columns={columns}
+          watermarkText={watermarkText}
+          pageColor={pageColor}
+          pageBorder={pageBorder}
+          pageBorderColor={pageBorderColor}
+          pageBorderWidth={pageBorderWidth}
+          pageBorderOffset={pageBorderOffset}
           onChangePageSize={(sz) => {
+            recordLayoutUndoPoint();
             setPageSize(sz);
             updateDocument(documentId, { pageSize: sz });
           }}
           onChangeOrientation={(ort) => {
+            recordLayoutUndoPoint();
             setOrientation(ort);
             updateDocument(documentId, { orientation: ort });
           }}
           onChangeMarginPreset={(p) => {
+            recordLayoutUndoPoint();
             setMarginPreset(p);
             const resolved = getResolvedMargins(p);
             setMargins(resolved);
             updateDocument(documentId, { marginPreset: p, margins: resolved });
           }}
           onChangeMargins={(m) => {
+            recordLayoutUndoPoint();
             setMargins(m);
             setMarginPreset('custom');
             updateDocument(documentId, { margins: m, marginPreset: 'custom' });
           }}
           onChangeColumns={(col) => {
+            recordLayoutUndoPoint();
             setColumns(col);
             updateDocument(documentId, { columns: col });
+          }}
+          onChangeWatermark={(wm) => {
+            recordLayoutUndoPoint();
+            setWatermarkText(wm);
+            updateDocument(documentId, { watermarkText: wm });
+          }}
+          onChangePageColor={(pc) => {
+            recordLayoutUndoPoint();
+            setPageColor(pc);
+            updateDocument(documentId, { pageColor: pc });
+          }}
+          onChangePageBorder={(pb) => {
+            recordLayoutUndoPoint();
+            setPageBorder(pb);
+            updateDocument(documentId, { pageBorder: pb });
+          }}
+          onChangePageBorderColor={(pbc) => {
+            recordLayoutUndoPoint();
+            setPageBorderColor(pbc);
+            updateDocument(documentId, { pageBorderColor: pbc });
+          }}
+          onChangePageBorderWidth={(pbw) => {
+            recordLayoutUndoPoint();
+            setPageBorderWidth(pbw);
+            updateDocument(documentId, { pageBorderWidth: pbw });
+          }}
+          onChangePageBorderOffset={(pbo) => {
+            recordLayoutUndoPoint();
+            setPageBorderOffset(pbo);
+            updateDocument(documentId, { pageBorderOffset: pbo });
           }}
           onOpenLinkModal={() => setLinkModalOpen(true)}
           onOpenCitationModal={() => setCitationModalOpen(true)}
           onOpenPageSetupModal={() => setPageSetupModalOpen(true)}
           onOpenStatsModal={() => setStatsModalOpen(true)}
+          onOpenChartModal={() => setChartModalOpen(true)}
+          onOpenDrawingModal={() => setDrawingModalOpen(true)}
+          onOpenEquationModal={() => setEquationModalOpen(true)}
+          onEnablePageNumbers={() => {
+            const next = !showPageNumbers;
+            setShowPageNumbers(next);
+            updateDocument(documentId, { showPageNumbers: next });
+          }}
           citations={citations}
           commentsCount={comments.length}
           unresolvedCount={unresolvedCommentsCount}
@@ -832,14 +1169,30 @@ export function DocumentEditor({ documentId, showBackToHome = false }: DocumentE
             />
           )}
 
-          {/* Paginated Document Sheet Canvas */}
-          <PaginatedCanvas
+          {/* Document Workspace Row: Vertical Ruler + Paginated Document Sheet Canvas */}
+          <div className="flex flex-1 min-h-0 overflow-hidden">
+            {showRuler && !isFocusMode && (
+              <VerticalRuler
+                pageDimensions={pageDimensions}
+                zoomLevel={zoomLevel}
+                onUpdateMargins={(newMargins) => {
+                  recordLayoutUndoPoint();
+                  setMargins(newMargins);
+                  setMarginPreset('custom');
+                  updateDocument(documentId, { margins: newMargins, marginPreset: 'custom' });
+                }}
+              />
+            )}
+
+            <PaginatedCanvas
             editor={editor}
             pageDimensions={pageDimensions}
             zoomLevel={zoomLevel}
             isPaginatedView={isPaginatedView}
             headerText={headerText}
             footerText={footerText}
+            headerAlign={headerAlign}
+            footerAlign={footerAlign}
             firstPageHeaderText={firstPageHeaderText}
             firstPageFooterText={firstPageFooterText}
             onUpdateHeaderText={(txt) => {
@@ -849,6 +1202,14 @@ export function DocumentEditor({ documentId, showBackToHome = false }: DocumentE
             onUpdateFooterText={(txt) => {
               setFooterText(txt);
               updateDocument(documentId, { footerText: txt });
+            }}
+            onUpdateHeaderAlign={(al) => {
+              setHeaderAlign(al);
+              updateDocument(documentId, { headerAlign: al });
+            }}
+            onUpdateFooterAlign={(al) => {
+              setFooterAlign(al);
+              updateDocument(documentId, { footerAlign: al });
             }}
             onUpdateFirstPageHeaderText={(txt) => {
               setFirstPageHeaderText(txt);
@@ -867,10 +1228,17 @@ export function DocumentEditor({ documentId, showBackToHome = false }: DocumentE
             }}
             columns={columns}
             showFormattingMarks={showFormattingMarks}
+            watermarkText={watermarkText}
+            pageColor={pageColor}
+            pageBorder={pageBorder}
+            pageBorderColor={pageBorderColor}
+            pageBorderWidth={pageBorderWidth}
+            pageBorderOffset={pageBorderOffset}
             wordCount={doc?.wordCount || 0}
             readingTime={doc?.readingTime || 1}
             onContextMenu={handleContextMenu}
           />
+          </div>
         </div>
 
         {/* Right Comments Sidebar */}
@@ -966,6 +1334,9 @@ export function DocumentEditor({ documentId, showBackToHome = false }: DocumentE
               footerText,
               showPageNumbers,
               differentFirstPage,
+              watermarkText,
+              pageColor,
+              pageBorder,
               wordCount: documentStats.wordCount,
               characterCount: documentStats.characterCount,
               readingTime: Math.max(1, Math.ceil(documentStats.wordCount / 200)),
@@ -987,6 +1358,9 @@ export function DocumentEditor({ documentId, showBackToHome = false }: DocumentE
               if (payload.footerText !== undefined) setFooterText(String(payload.footerText));
               if (payload.showPageNumbers !== undefined) setShowPageNumbers(Boolean(payload.showPageNumbers));
               if (payload.differentFirstPage !== undefined) setDifferentFirstPage(Boolean(payload.differentFirstPage));
+              if (payload.watermarkText !== undefined) setWatermarkText(String(payload.watermarkText));
+              if (payload.pageColor !== undefined) setPageColor(String(payload.pageColor));
+              if (payload.pageBorder !== undefined) setPageBorder(payload.pageBorder as any);
             }
 
             return editorRegistry.executeAction(
@@ -1004,6 +1378,9 @@ export function DocumentEditor({ documentId, showBackToHome = false }: DocumentE
                 if (updates.footerText !== undefined) setFooterText(updates.footerText);
                 if (updates.showPageNumbers !== undefined) setShowPageNumbers(updates.showPageNumbers);
                 if (updates.differentFirstPage !== undefined) setDifferentFirstPage(updates.differentFirstPage);
+                if (updates.watermarkText !== undefined) setWatermarkText(updates.watermarkText);
+                if (updates.pageColor !== undefined) setPageColor(updates.pageColor);
+                if (updates.pageBorder !== undefined) setPageBorder(updates.pageBorder);
                 updateDocument(id, updates);
                 setSaveStatus('saved');
               }
@@ -1074,6 +1451,64 @@ export function DocumentEditor({ documentId, showBackToHome = false }: DocumentE
         currentWordCount={doc?.wordCount || 0}
         onSaveCurrentVersion={handleSaveCurrentVersion}
         onRestoreVersion={handleRestoreVersion}
+      />
+
+      <ChartModal
+        isOpen={chartModalOpen}
+        onClose={() => setChartModalOpen(false)}
+        onInsertChartImage={(dataUrl, chartTitle, width, height) => {
+          if (editor) {
+            editor
+              .chain()
+              .focus()
+              .insertContent({
+                type: 'image',
+                attrs: {
+                  src: dataUrl,
+                  alt: chartTitle,
+                  title: chartTitle,
+                  width,
+                  height,
+                  alignment: 'center',
+                  caption: `Chart: ${chartTitle}`,
+                },
+              })
+              .run();
+          }
+        }}
+      />
+
+      <DrawingModal
+        isOpen={drawingModalOpen}
+        onClose={() => setDrawingModalOpen(false)}
+        onInsertDrawing={(dataUrl, width, height) => {
+          if (editor) {
+            editor
+              .chain()
+              .focus()
+              .insertContent({
+                type: 'image',
+                attrs: {
+                  src: dataUrl,
+                  alt: 'Drawing',
+                  width,
+                  height,
+                  alignment: 'center',
+                },
+              })
+              .run();
+          }
+        }}
+      />
+
+      <EquationModal
+        isOpen={equationModalOpen}
+        onClose={() => setEquationModalOpen(false)}
+        onInsertEquation={(latex, displayMode) => {
+          if (editor) {
+            editor.chain().focus().insertEquation({ latex, displayMode }).run();
+          }
+        }}
       />
 
       {/* 6. Context-Sensitive Right-Click Menu */}

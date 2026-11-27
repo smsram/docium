@@ -35,6 +35,7 @@ export default function AiCreationHomepage() {
   const router = useRouter();
   const {
     createFromPrompt,
+    addDocumentSource,
     documents,
     sheets,
     slides,
@@ -62,6 +63,7 @@ export default function AiCreationHomepage() {
   const [urlsHovered, setUrlsHovered] = useState(false);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const rawFilesMapRef = useRef<Map<string, File>>(new Map());
   const toolsPopoverRef = useRef<HTMLDivElement>(null);
   const attachMenuRef = useRef<HTMLDivElement>(null);
   const filesPopoverRef = useRef<HTMLDivElement>(null);
@@ -246,87 +248,49 @@ export default function AiCreationHomepage() {
 
   const handleCreate = async () => {
     if (isProcessing) return;
-    const promptText = composerDraft.prompt.trim();
-
-    // 1. Empty prompt: creates directly without calling AI provider or generating content
-    if (!promptText) {
-      const newId = createFromPrompt(
-        '',
-        composerDraft.format,
-        composerDraft.attachments.map((a) => ({ name: a.name, size: a.size, type: a.type })),
-        composerDraft.urls,
-        '<p></p>'
-      );
-      router.push(`/workspace/${newId}`);
-      return;
-    }
-
-    // 2. Provided prompt: processes prompt via selected provider/model, generating document content specifically based on that prompt
     setIsProcessing(true);
-    setProcessingStep('Generating document content...');
+    setProcessingStep('Opening workspace...');
 
-    let generatedContent = '';
-    try {
-      const provConfig = providers[defaultProvider];
-      const apiKey = provConfig?.apiKey || '';
-      const accountId = provConfig?.accountId || '';
-      const baseUrl = provConfig?.baseUrl || '';
-      const modelId = provConfig?.selectedModel || '';
+    const promptText = composerDraft.prompt.trim();
+    const draftAttachments = [...composerDraft.attachments];
+    const draftUrls = [...composerDraft.urls];
 
-      const res = await fetch('/api/ai/agent', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          requestId: `init-${Date.now()}`,
-          workspaceId: `temp-${Date.now()}`,
-          workspaceType: composerDraft.format === 'auto' ? 'doc' : composerDraft.format,
-          userPrompt: `Generate the document body for: "${promptText}". Format strictly as clean Markdown without conversational preamble or concluding remarks.`,
-          conversationHistory: [],
-          providerId: defaultProvider,
-          modelId,
-          apiKey,
-          accountId,
-          baseUrl,
-          enabledTools: { internetSearch: false, imageGeneration: false, chartsAndData: false },
-        }),
-      });
+    // Create the workspace item of the corresponding type immediately with blank content ('<p></p>')
+    // and store initialPrompt so WorkspaceAI starts the actual AI work live inside the opened workspace.
+    const newId = createFromPrompt(
+      promptText,
+      composerDraft.format,
+      draftAttachments.map((a) => ({ name: a.name, size: a.size, type: a.type })),
+      draftUrls,
+      '<p></p>'
+    );
 
-      if (res.ok && res.body) {
-        const reader = res.body.getReader();
-        const decoder = new TextDecoder();
-        let buffer = '';
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          buffer += decoder.decode(value, { stream: true });
-          const lines = buffer.split('\n\n');
-          buffer = lines.pop() || '';
-          for (const line of lines) {
-            if (line.startsWith('data: ')) {
-              try {
-                const data = JSON.parse(line.slice(6));
-                if (data.type === 'delta' && data.text) {
-                  generatedContent += data.text;
-                } else if (data.type === 'replace_content' && data.text) {
-                  generatedContent = data.text;
-                }
-              } catch {}
+    // Upload any attached raw files to workspace source storage in the background
+    for (const att of draftAttachments) {
+      const rawFile = rawFilesMapRef.current.get(att.id);
+      if (rawFile) {
+        const formData = new FormData();
+        formData.append('file', rawFile);
+        formData.append('workspaceId', newId);
+        fetch('/api/ai/sources/upload', {
+          method: 'POST',
+          body: formData,
+        })
+          .then((res) => (res.ok ? res.json() : null))
+          .then((data) => {
+            if (data?.source) {
+              addDocumentSource(newId, data.source);
             }
-          }
-        }
+          })
+          .catch((err) => {
+            console.warn('[DOCIUM] Background source upload warning:', err);
+          });
       }
-    } catch (e) {
-      console.warn('[DOCIUM] Initial AI generation completed with fallback:', e);
     }
 
-    const finalHtml = generatedContent.trim() ? convertMarkdownToDocumentHtml(generatedContent) : undefined;
-    const newId = createFromPrompt(
-      composerDraft.prompt,
-      composerDraft.format,
-      composerDraft.attachments.map((a) => ({ name: a.name, size: a.size, type: a.type })),
-      composerDraft.urls,
-      finalHtml
-    );
+    updateComposerDraft({ prompt: '', attachments: [], urls: [] });
+    rawFilesMapRef.current.clear();
+
     router.push(`/workspace/${newId}`);
   };
 
@@ -365,8 +329,10 @@ export default function AiCreationHomepage() {
         previewUrl = URL.createObjectURL(file);
       }
 
+      const attId = `att-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+      rawFilesMapRef.current.set(attId, file);
       validFiles.push({
-        id: `att-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+        id: attId,
         name: file.name,
         size: `${(file.size / 1024).toFixed(1)} KB`,
         type: file.type || 'document',

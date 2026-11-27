@@ -204,8 +204,35 @@ export function parseCloudflareError(
 }
 
 /**
- * Extracts delta text from varied Cloudflare Workers AI streaming or non-streaming responses.
- * Supports OpenAI-compatible content, reasoning content (Qwen/DeepSeek), Workers AI raw response, and result envelopes.
+ * Extracts internal reasoning/thinking delta from Cloudflare Workers AI chunks (e.g. Qwen 3.8, DeepSeek R1/V3).
+ * Kept strictly separate from normal assistant content so reasoning never leaks into final chat responses.
+ */
+export function extractReasoningFromChunk(
+  parsed: {
+    choices?: Array<{
+      delta?: { content?: string | null; reasoning_content?: string | null; reasoning?: string | null };
+      message?: { content?: string | null; reasoning_content?: string | null; reasoning?: string | null };
+    }>;
+  }
+): string | null {
+  const deltaReasoning =
+    parsed.choices?.[0]?.delta?.reasoning_content ??
+    parsed.choices?.[0]?.delta?.reasoning;
+  if (typeof deltaReasoning === 'string' && deltaReasoning.length > 0) {
+    return deltaReasoning;
+  }
+  const msgReasoning =
+    parsed.choices?.[0]?.message?.reasoning_content ??
+    parsed.choices?.[0]?.message?.reasoning;
+  if (typeof msgReasoning === 'string' && msgReasoning.length > 0) {
+    return msgReasoning;
+  }
+  return null;
+}
+
+/**
+ * Extracts visible assistant delta text from varied Cloudflare Workers AI streaming or non-streaming responses.
+ * Strictly excludes reasoning_content so chain-of-thought is never mixed into main assistant text.
  */
 export function extractDeltaFromChunk(
   parsed: {
@@ -233,18 +260,12 @@ export function extractDeltaFromChunk(
   if (typeof choiceMessage === 'string' && choiceMessage.length > 0) {
     return choiceMessage;
   }
-  // 4. Reasoning content (Qwen 2.5/3.8, DeepSeek models) if normal content is empty
-  const reasoningDelta = parsed.choices?.[0]?.delta?.reasoning_content || parsed.choices?.[0]?.delta?.reasoning;
-  if (typeof reasoningDelta === 'string' && reasoningDelta.length > 0) {
-    // Only return reasoning if explicitly present
-    return reasoningDelta;
-  }
-  // 5. Completions legacy text field: {"choices":[{"text":"token"}]}
+  // 4. Completions legacy text field: {"choices":[{"text":"token"}]}
   const choiceText = parsed.choices?.[0]?.text;
   if (typeof choiceText === 'string' && choiceText.length > 0) {
     return choiceText;
   }
-  // 6. Workers AI non-streaming result envelope: {"result":{"response":"text"}}
+  // 5. Workers AI non-streaming result envelope: {"result":{"response":"text"}}
   if (typeof parsed.result === 'object' && parsed.result !== null) {
     if (typeof parsed.result.response === 'string' && parsed.result.response.length > 0) {
       return parsed.result.response;
@@ -256,7 +277,7 @@ export function extractDeltaFromChunk(
   if (typeof parsed.result === 'string' && parsed.result.length > 0) {
     return parsed.result;
   }
-  // 7. Direct output_text field
+  // 6. Direct output_text field
   if (typeof parsed.output_text === 'string' && parsed.output_text.length > 0) {
     return parsed.output_text;
   }
@@ -597,13 +618,17 @@ export class CloudflareAdapter implements BaseProviderAdapter {
     const cleanModel = normalizeCloudflareModelId(model);
     const formatted = this.formatMessages(messages);
     if (endpointType === 'chat_completions') {
+      const disableThinking = messages.some((m) => typeof m.content === 'string' && m.content.includes('/no_think'));
       const payload: Record<string, unknown> = {
         model: cleanModel,
         messages: formatted,
         stream: true,
         temperature: options?.temperature ?? 0.4,
-        max_tokens: options?.maxTokens || 4096,
+        max_tokens: options?.maxTokens || 8192,
       };
+      if (disableThinking) {
+        payload.chat_template_kwargs = { enable_thinking: false };
+      }
       if (options?.tools && options.tools.length > 0) {
         payload.tools = options.tools.map((t) => ({
           type: 'function',
@@ -620,7 +645,7 @@ export class CloudflareAdapter implements BaseProviderAdapter {
     return {
       messages: formatted,
       stream: true,
-      max_tokens: options?.maxTokens || 4096,
+      max_tokens: options?.maxTokens || 8192,
     };
   }
 
@@ -751,6 +776,11 @@ export class CloudflareAdapter implements BaseProviderAdapter {
         }
 
         // 2. Retry only for transient failures (408 Request Timeout, 429 Rate Limit, 500-504 Server Outages)
+        // If fastFailOn429 is enabled (another credential pair is available), fail immediately on 429 so rotation is instant!
+        if (res.status === 429 && options.fastFailOn429) {
+          response = res;
+          break;
+        }
         if (res.status === 408 || res.status === 429 || (res.status >= 500 && res.status <= 504)) {
           if (attempt <= maxRetries && !options.signal?.aborted) {
             const retryAfterHeader = res.headers.get('retry-after');
@@ -821,6 +851,7 @@ export class CloudflareAdapter implements BaseProviderAdapter {
     // Track active streaming tool calls across chunks
     const pendingToolCalls: Record<number, { id: string; name: string; argsBuffer: string }> = {};
     let accumulatedText = '';
+    let accumulatedReasoning = '';
     let toolCallsFlushed = false;
     let chunksCount = 0;
     let lastFinishReason: string | null = null;
@@ -906,10 +937,16 @@ export class CloudflareAdapter implements BaseProviderAdapter {
         for (const chunk of flushToolCalls()) yield chunk;
       }
 
+      const reasoning = extractReasoningFromChunk(json);
+      if (reasoning) {
+        accumulatedReasoning += reasoning;
+        yield { type: 'reasoning', delta: reasoning, finishReason: choice?.finish_reason || undefined };
+      }
+
       const delta = extractDeltaFromChunk(json);
       if (delta) {
         accumulatedText += delta;
-        yield { type: 'delta', delta };
+        yield { type: 'delta', delta, finishReason: choice?.finish_reason || undefined };
       }
     };
 
@@ -972,8 +1009,8 @@ export class CloudflareAdapter implements BaseProviderAdapter {
         }
       }
 
-      // Non-Streaming Fallback: If streaming yielded 0 deltas and 0 tool calls, attempt non-streaming before declaring empty
-      if (!options.signal?.aborted && !accumulatedText.trim() && Object.keys(pendingToolCalls).length === 0) {
+      // Non-Streaming Fallback: If streaming yielded 0 deltas, 0 reasoning, and 0 tool calls, attempt non-streaming before declaring empty
+      if (!options.signal?.aborted && !accumulatedText.trim() && !accumulatedReasoning.trim() && Object.keys(pendingToolCalls).length === 0) {
         console.log(`[Cloudflare Workers AI] Streaming produced empty response (chunks: ${chunksCount}). Attempting non-streaming fallback...`);
         try {
           const nonStreamRes = await fetch(primary.url, {
@@ -989,6 +1026,9 @@ export class CloudflareAdapter implements BaseProviderAdapter {
           if (nonStreamRes.ok) {
             const json = await nonStreamRes.json();
             const choice = json.choices?.[0];
+            if (choice?.finish_reason) {
+              lastFinishReason = choice.finish_reason;
+            }
 
             if (choice?.message?.tool_calls && Array.isArray(choice.message.tool_calls)) {
               for (const tc of choice.message.tool_calls) {
@@ -1007,6 +1047,12 @@ export class CloudflareAdapter implements BaseProviderAdapter {
                   },
                 };
               }
+            }
+
+            const reasoning = extractReasoningFromChunk(json);
+            if (reasoning) {
+              accumulatedReasoning += reasoning;
+              yield { type: 'reasoning', delta: reasoning };
             }
 
             const text = extractDeltaFromChunk(json);
@@ -1028,9 +1074,9 @@ export class CloudflareAdapter implements BaseProviderAdapter {
     }
 
     console.log(
-      `[DOCIUM AI Diagnostic] Cloudflare stream completed | model: ${cleanModel} | chunks: ${chunksCount} | finishReason: ${lastFinishReason || 'none'} | hasText: ${Boolean(accumulatedText.trim())} | toolCalls: ${Object.keys(pendingToolCalls).length}`
+      `[DOCIUM AI Diagnostic] Cloudflare stream completed | model: ${cleanModel} | chunks: ${chunksCount} | finishReason: ${lastFinishReason || 'none'} | hasText: ${Boolean(accumulatedText.trim())} | hasReasoning: ${Boolean(accumulatedReasoning.trim())} | toolCalls: ${Object.keys(pendingToolCalls).length}`
     );
 
-    yield { type: 'done' };
+    yield { type: 'done', finishReason: lastFinishReason || undefined };
   }
 }

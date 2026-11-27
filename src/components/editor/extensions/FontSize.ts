@@ -1,4 +1,5 @@
 import { Mark, mergeAttributes } from '@tiptap/core';
+import { normalizeFontSizeToPt } from '@/lib/editor/fontCatalog';
 
 declare module '@tiptap/core' {
   interface Commands<ReturnType> {
@@ -16,7 +17,10 @@ export const FontSize = Mark.create({
     return {
       size: {
         default: null,
-        parseHTML: (element) => element.style.fontSize?.replace(/['"]+/g, ''),
+        parseHTML: (element) => {
+          const raw = element.style.fontSize?.replace(/['"]+/g, '');
+          return raw ? normalizeFontSizeToPt(raw) : null;
+        },
         renderHTML: (attributes) => {
           if (!attributes.size) return {};
           return {
@@ -44,7 +48,8 @@ export const FontSize = Mark.create({
       setFontSize:
         (size: string) =>
         ({ commands }) => {
-          return commands.setMark(this.name, { size });
+          const normalized = normalizeFontSizeToPt(size);
+          return commands.setMark(this.name, { size: normalized });
         },
       unsetFontSize:
         () =>
@@ -54,4 +59,3 @@ export const FontSize = Mark.create({
     };
   },
 });
-

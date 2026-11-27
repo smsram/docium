@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { type Editor } from '@tiptap/react';
 import {
   DocumentPageSize,
@@ -27,16 +27,32 @@ interface RibbonContainerProps {
   marginPreset: MarginPreset;
   margins: DocumentMargins;
   columns: 1 | 2 | 3;
+  watermarkText?: string;
+  pageColor?: string;
+  pageBorder?: 'none' | 'box' | 'shadow' | 'double' | 'accent';
+  pageBorderColor?: string;
+  pageBorderWidth?: number;
+  pageBorderOffset?: 'edge' | 'margin' | 'wide';
   onChangePageSize: (size: DocumentPageSize) => void;
   onChangeOrientation: (orientation: DocumentOrientation) => void;
   onChangeMarginPreset: (preset: MarginPreset) => void;
   onChangeMargins: (margins: DocumentMargins) => void;
   onChangeColumns: (cols: 1 | 2 | 3) => void;
+  onChangeWatermark?: (text: string) => void;
+  onChangePageColor?: (color: string) => void;
+  onChangePageBorder?: (border: 'none' | 'box' | 'shadow' | 'double' | 'accent') => void;
+  onChangePageBorderColor?: (color: string) => void;
+  onChangePageBorderWidth?: (width: number) => void;
+  onChangePageBorderOffset?: (offset: 'edge' | 'margin' | 'wide') => void;
   // Modals
   onOpenLinkModal: () => void;
   onOpenCitationModal: () => void;
   onOpenPageSetupModal: () => void;
   onOpenStatsModal: () => void;
+  onOpenChartModal: () => void;
+  onOpenDrawingModal: () => void;
+  onOpenEquationModal: () => void;
+  onEnablePageNumbers?: () => void;
   // Review & Comments
   citations: DocumentCitation[];
   commentsCount: number;
@@ -82,15 +98,31 @@ export function RibbonContainer({
   marginPreset,
   margins,
   columns,
+  watermarkText,
+  pageColor,
+  pageBorder,
+  pageBorderColor,
+  pageBorderWidth,
+  pageBorderOffset,
   onChangePageSize,
   onChangeOrientation,
   onChangeMarginPreset,
   onChangeMargins,
   onChangeColumns,
+  onChangeWatermark,
+  onChangePageColor,
+  onChangePageBorder,
+  onChangePageBorderColor,
+  onChangePageBorderWidth,
+  onChangePageBorderOffset,
   onOpenLinkModal,
   onOpenCitationModal,
   onOpenPageSetupModal,
   onOpenStatsModal,
+  onOpenChartModal,
+  onOpenDrawingModal,
+  onOpenEquationModal,
+  onEnablePageNumbers,
   citations,
   commentsCount,
   unresolvedCount,
@@ -118,6 +150,15 @@ export function RibbonContainer({
 }: RibbonContainerProps) {
   const [activeTab, setActiveTab] = useState<RibbonTabKey>('home');
   const [isCollapsed, setIsCollapsed] = useState(false);
+
+  useEffect(() => {
+    const onOpenFindReplace = () => {
+      setActiveTab('home');
+      setIsCollapsed(false);
+    };
+    window.addEventListener('docium:open-find-replace', onOpenFindReplace);
+    return () => window.removeEventListener('docium:open-find-replace', onOpenFindReplace);
+  }, []);
 
   if (isFocusMode) {
     return null; // Ribbon is hidden in focus mode
@@ -183,6 +224,10 @@ export function RibbonContainer({
               onOpenLinkModal={onOpenLinkModal}
               onOpenCitationModal={onOpenCitationModal}
               onOpenPageSetupModal={onOpenPageSetupModal}
+              onOpenChartModal={onOpenChartModal}
+              onOpenDrawingModal={onOpenDrawingModal}
+              onOpenEquationModal={onOpenEquationModal}
+              onEnablePageNumbers={onEnablePageNumbers}
             />
           )}
 
@@ -193,11 +238,23 @@ export function RibbonContainer({
               marginPreset={marginPreset}
               margins={margins}
               columns={columns}
+              watermarkText={watermarkText}
+              pageColor={pageColor}
+              pageBorder={pageBorder}
+              pageBorderColor={pageBorderColor}
+              pageBorderWidth={pageBorderWidth}
+              pageBorderOffset={pageBorderOffset}
               onChangePageSize={onChangePageSize}
               onChangeOrientation={onChangeOrientation}
               onChangeMarginPreset={onChangeMarginPreset}
               onChangeMargins={onChangeMargins}
               onChangeColumns={onChangeColumns}
+              onChangeWatermark={onChangeWatermark}
+              onChangePageColor={onChangePageColor}
+              onChangePageBorder={onChangePageBorder}
+              onChangePageBorderColor={onChangePageBorderColor}
+              onChangePageBorderWidth={onChangePageBorderWidth}
+              onChangePageBorderOffset={onChangePageBorderOffset}
               onOpenPageSetupModal={onOpenPageSetupModal}
             />
           )}

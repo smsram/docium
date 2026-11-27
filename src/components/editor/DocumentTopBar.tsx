@@ -47,8 +47,13 @@ interface DocumentTopBarProps {
   aiDocked: boolean;
   onToggleAiPanel: () => void;
   // Modals & Actions
+  onUndo?: () => void;
+  onRedo?: () => void;
+  canUndo?: boolean;
+  canRedo?: boolean;
   onExportDocx: () => void;
   onExportPdf: () => void;
+  onPrint?: () => void;
   onExportMarkdown: () => void;
   onExportHtml: () => void;
   onExportPlainText: () => void;
@@ -73,8 +78,13 @@ export function DocumentTopBar({
   unresolvedCommentsCount,
   aiDocked,
   onToggleAiPanel,
+  onUndo,
+  onRedo,
+  canUndo,
+  canRedo,
   onExportDocx,
   onExportPdf,
+  onPrint,
   onExportMarkdown,
   onExportHtml,
   onExportPlainText,
@@ -108,10 +118,10 @@ export function DocumentTopBar({
     },
     {
       id: 'export-pdf',
-      label: 'Print / PDF Document',
-      sublabel: 'Vector print preview format',
+      label: 'Download PDF Document',
+      sublabel: 'Direct Word-accurate PDF download',
       badge: 'PDF',
-      icon: Printer,
+      icon: FileDown,
       onClick: onExportPdf,
     },
     {
@@ -170,7 +180,7 @@ export function DocumentTopBar({
       label: 'Print (Ctrl+P)',
       icon: Printer,
       separator: true,
-      onClick: onExportPdf,
+      onClick: onPrint || onExportPdf,
     },
   ];
 
@@ -227,8 +237,8 @@ export function DocumentTopBar({
         <div className="hidden lg:flex items-center gap-0.5 ml-2 border-l border-[var(--border)] pl-2">
           <button
             type="button"
-            onClick={() => editor?.chain().focus().undo().run()}
-            disabled={!editor?.can().undo()}
+            onClick={() => (onUndo ? onUndo() : editor?.chain().focus().undo().run())}
+            disabled={canUndo !== undefined ? !canUndo : !editor?.can().undo()}
             className="flex h-7 w-7 items-center justify-center rounded hover:bg-[var(--accent)] disabled:opacity-30 cursor-pointer"
             title="Undo (Ctrl+Z)"
           >
@@ -236,8 +246,8 @@ export function DocumentTopBar({
           </button>
           <button
             type="button"
-            onClick={() => editor?.chain().focus().redo().run()}
-            disabled={!editor?.can().redo()}
+            onClick={() => (onRedo ? onRedo() : editor?.chain().focus().redo().run())}
+            disabled={canRedo !== undefined ? !canRedo : !editor?.can().redo()}
             className="flex h-7 w-7 items-center justify-center rounded hover:bg-[var(--accent)] disabled:opacity-30 cursor-pointer"
             title="Redo (Ctrl+Y)"
           >

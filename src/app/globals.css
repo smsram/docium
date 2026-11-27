@@ -119,139 +119,324 @@ body {
   background: var(--text-muted);
 }
 
-/* Tiptap editor typography & styles */
+/* Tiptap editor typography & WYSIWYG Word/Google Docs page styles */
 .tiptap {
   outline: none !important;
+  font-family: Calibri, Aptos, "Segoe UI", Inter, Arial, sans-serif;
+  font-size: 11pt;
+  line-height: 1.38;
+  color: #171c19;
+  word-wrap: break-word;
+  overflow-wrap: break-word;
+}
+
+.docium-paper-sheet {
+  background-color: #ffffff;
+  color: #171c19;
 }
 
 .tiptap p.is-editor-empty:first-child::before {
-  color: var(--text-muted);
+  color: #9ca3af;
   content: attr(data-placeholder);
   float: left;
   height: 0;
   pointer-events: none;
 }
 
+.tiptap > *:first-child {
+  margin-top: 0 !important;
+}
+
 .tiptap h1 {
-  font-size: 1.875rem;
+  font-size: 20pt;
   font-weight: 700;
   line-height: 1.25;
-  margin-top: 1.5rem;
-  margin-bottom: 0.75rem;
-  color: var(--text);
+  margin-top: 14pt;
+  margin-bottom: 6pt;
+  color: #245c45;
 }
 
 .tiptap h2 {
-  font-size: 1.5rem;
-  font-weight: 600;
+  font-size: 15pt;
+  font-weight: 700;
   line-height: 1.3;
-  margin-top: 1.25rem;
-  margin-bottom: 0.5rem;
-  color: var(--text);
+  margin-top: 12pt;
+  margin-bottom: 4pt;
+  color: #398568;
 }
 
 .tiptap h3 {
-  font-size: 1.25rem;
+  font-size: 12.5pt;
+  font-weight: 700;
+  line-height: 1.35;
+  margin-top: 10pt;
+  margin-bottom: 3pt;
+  color: #171c19;
+}
+
+.tiptap h4 {
+  font-size: 11pt;
+  font-weight: 700;
+  font-style: italic;
+  line-height: 1.35;
+  margin-top: 8pt;
+  margin-bottom: 2pt;
+  color: #245c45;
+}
+
+.tiptap h5 {
+  font-size: 10.5pt;
   font-weight: 600;
   line-height: 1.35;
-  margin-top: 1rem;
-  margin-bottom: 0.5rem;
-  color: var(--text);
+  margin-top: 6pt;
+  margin-bottom: 2pt;
+  color: #374151;
+}
+
+.tiptap h6 {
+  font-size: 10pt;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  line-height: 1.35;
+  margin-top: 6pt;
+  margin-bottom: 2pt;
+  color: #6b7280;
 }
 
 .tiptap p {
-  line-height: 1.7;
-  margin-bottom: 0.75rem;
-  color: var(--text);
+  line-height: 1.38;
+  margin-top: 0;
+  margin-bottom: 6pt;
+  color: inherit;
+}
+
+.tiptap a {
+  color: #0563c1;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+
+.tiptap a:hover {
+  color: #044a91;
+}
+
+.tiptap mark {
+  background-color: #fef08a;
+  color: inherit;
+  border-radius: 2px;
+  padding: 0 1px;
 }
 
 .tiptap ul {
   list-style-type: disc;
   padding-left: 1.5rem;
-  margin-bottom: 0.75rem;
+  margin-top: 0;
+  margin-bottom: 6pt;
+}
+
+.tiptap ul ul {
+  list-style-type: circle;
+  margin-bottom: 0;
+}
+
+.tiptap ul ul ul {
+  list-style-type: square;
 }
 
 .tiptap ol {
   list-style-type: decimal;
   padding-left: 1.5rem;
-  margin-bottom: 0.75rem;
+  margin-top: 0;
+  margin-bottom: 6pt;
+}
+
+.tiptap ol ol {
+  list-style-type: lower-alpha;
+  margin-bottom: 0;
+}
+
+.tiptap ol ol ol {
+  list-style-type: lower-roman;
 }
 
 .tiptap li {
-  margin-bottom: 0.25rem;
+  margin-bottom: 2pt;
+}
+
+.tiptap li > p {
+  margin-top: 0;
+  margin-bottom: 2pt;
+}
+
+/* Task Checklist (Word / Google Docs interactive checklist) */
+.tiptap ul[data-type="taskList"] {
+  list-style: none;
+  padding-left: 0.25rem;
+  margin-bottom: 6pt;
+}
+
+.tiptap ul[data-type="taskList"] li {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5rem;
+  margin-bottom: 3pt;
+}
+
+.tiptap ul[data-type="taskList"] li > label {
+  flex: 0 0 auto;
+  margin-top: 0.2rem;
+  user-select: none;
+}
+
+.tiptap ul[data-type="taskList"] li > label input[type="checkbox"] {
+  accent-color: #245c45;
+  width: 14px;
+  height: 14px;
+  cursor: pointer;
+}
+
+.tiptap ul[data-type="taskList"] li > div {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.tiptap ul[data-type="taskList"] li[data-checked="true"] > div {
+  text-decoration: line-through;
+  color: #6b7280;
 }
 
 .tiptap blockquote {
-  border-left: 3px solid var(--primary);
-  padding-left: 1rem;
+  border-left: 3pt solid #245c45;
+  padding-left: 10pt;
   margin-left: 0;
   margin-right: 0;
-  margin-top: 1rem;
-  margin-bottom: 1rem;
-  color: var(--text-muted);
+  margin-top: 8pt;
+  margin-bottom: 8pt;
+  color: #4b5563;
   font-style: italic;
 }
 
 .tiptap pre {
-  background: #1e2420;
-  color: #e5ede9;
-  font-family: var(--font-geist-mono), monospace;
-  padding: 0.85rem 1.2rem;
-  border-radius: 0.375rem;
-  margin: 1rem 0;
+  background: #f4f6f4;
+  border: 1px solid #dce2da;
+  color: #171c19;
+  font-family: Consolas, "JetBrains Mono", "Courier New", monospace;
+  font-size: 9.5pt;
+  line-height: 1.45;
+  padding: 8pt 10pt;
+  border-radius: 4px;
+  margin: 8pt 0;
   overflow-x: auto;
+  white-space: pre-wrap;
 }
 
 .tiptap code {
-  background: var(--accent);
-  color: var(--primary);
-  font-family: var(--font-geist-mono), monospace;
-  font-size: 0.875em;
-  padding: 0.15rem 0.35rem;
-  border-radius: 0.25rem;
+  background: #f1f5f2;
+  color: #245c45;
+  font-family: Consolas, "JetBrains Mono", "Courier New", monospace;
+  font-size: 0.9em;
+  padding: 1pt 3pt;
+  border-radius: 3px;
 }
 
 .tiptap pre code {
   background: transparent;
   color: inherit;
   padding: 0;
+  font-size: inherit;
+}
+
+.tiptap .tableWrapper {
+  margin: 8pt 0;
+  width: 100%;
+  overflow-x: visible;
 }
 
 .tiptap table {
   border-collapse: collapse;
+  border-spacing: 0;
   table-layout: fixed;
   width: 100%;
-  margin: 1.5rem 0;
-  overflow: hidden;
+  margin: 8pt 0;
+}
+
+.tiptap table[data-split-continuation="true"] {
+  margin-top: 0;
+}
+
+.tiptap .tableWrapper > table {
+  margin: 0;
 }
 
 .tiptap table td,
 .tiptap table th {
-  min-width: 1em;
-  border: 1px solid var(--border);
-  padding: 8px 12px;
+  min-width: 24px;
+  border: 1px solid #cbd5e1;
+  padding: 5pt 7pt;
   vertical-align: top;
   box-sizing: border-box;
   position: relative;
+  font-size: 10.5pt;
+  line-height: 1.35;
+}
+
+.tiptap table td > p,
+.tiptap table th > p {
+  margin: 0;
+}
+
+.tiptap table td > p + p,
+.tiptap table th > p + p {
+  margin-top: 2pt;
 }
 
 .tiptap table th {
-  font-weight: 600;
+  font-weight: 700;
   text-align: left;
-  background-color: var(--accent);
+  background-color: #f1f5f3;
+  color: #171c19;
+}
+
+.tiptap table .selectedCell::after {
+  z-index: 2;
+  position: absolute;
+  content: "";
+  left: 0;
+  right: 0;
+  top: 0;
+  bottom: 0;
+  background: rgba(36, 92, 69, 0.14);
+  pointer-events: none;
+}
+
+.tiptap table .column-resize-handle {
+  position: absolute;
+  right: -2px;
+  top: 0;
+  bottom: -2px;
+  width: 4px;
+  background-color: #245c45;
+  pointer-events: none;
+  z-index: 20;
+}
+
+.tiptap.resize-cursor {
+  cursor: col-resize;
 }
 
 .tiptap hr {
   border: none;
-  border-top: 1px solid var(--border);
-  margin: 1.5rem 0;
+  border-top: 1px solid #cbd5e1;
+  margin: 10pt 0;
 }
 
 .tiptap img {
   max-width: 100%;
   height: auto;
-  border-radius: 0.375rem;
-  margin: 1rem 0;
+  border-radius: 2px;
+  margin: 6pt 0;
 }
 
 /* Page print simulation */
@@ -372,6 +557,26 @@ body {
   overflow: hidden;
 }
 
+.docium-katex-math .katex,
+.docium-katex-math .katex .mord,
+.docium-katex-math .katex .mathnormal,
+.docium-katex-math .katex .mtext,
+.docium-katex-math .katex .minner,
+.docium-katex-math .katex .mop,
+.docium-katex-math .katex .mbin,
+.docium-katex-math .katex .mrel,
+.docium-katex-math .katex .mopen,
+.docium-katex-math .katex .mclose,
+.docium-katex-math .katex .mpunct {
+  font-family: inherit !important;
+  color: inherit !important;
+}
+
+.docium-katex-math .katex {
+  font-size: 1.05em !important;
+  line-height: 1.2 !important;
+}
+
 .activity-steps-panel--open {
   grid-template-rows: 1fr;
   opacity: 1;
@@ -391,5 +596,60 @@ body {
 
   .activity-steps-panel {
     transition: none !important;
+  }
+}
+
+/* ─────────────────────────────────────────────────────────────────────────────
+   Native Print / Ctrl+P — Print ONLY the Document Pages cleanly
+   ───────────────────────────────────────────────────────────────────────── */
+@media print {
+  @page {
+    margin: 0;
+  }
+
+  html,
+  body {
+    background: #ffffff !important;
+    color: #171c19 !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    overflow: visible !important;
+    height: auto !important;
+  }
+
+  aside,
+  header,
+  nav,
+  footer,
+  .no-print,
+  .docium-ribbon,
+  .docium-topbar,
+  .workspace-ai-panel,
+  .docium-ruler,
+  [data-docium-ui-only="true"] {
+    display: none !important;
+  }
+
+  main,
+  #docium-paginated-sheet {
+    position: static !important;
+    overflow: visible !important;
+    margin: 0 auto !important;
+    padding: 0 !important;
+    background: #ffffff !important;
+    transform: none !important;
+  }
+
+  .docium-paper-sheet {
+    box-shadow: none !important;
+    border: none !important;
+    border-radius: 0 !important;
+    break-after: page !important;
+    page-break-after: always !important;
+  }
+
+  .docium-paper-sheet:last-child {
+    break-after: auto !important;
+    page-break-after: auto !important;
   }
 }

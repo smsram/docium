@@ -1,4 +1,5 @@
 import { Mark, mergeAttributes } from '@tiptap/core';
+import { ensureGoogleFontLoaded, resolveFontFamilyValue } from '@/lib/editor/fontCatalog';
 
 declare module '@tiptap/core' {
   interface Commands<ReturnType> {
@@ -16,9 +17,15 @@ export const FontFamily = Mark.create({
     return {
       font: {
         default: null,
-        parseHTML: (element) => element.style.fontFamily?.replace(/['"]+/g, ''),
+        parseHTML: (element) => {
+          const raw = element.style.fontFamily;
+          if (!raw) return null;
+          ensureGoogleFontLoaded(raw);
+          return resolveFontFamilyValue(raw);
+        },
         renderHTML: (attributes) => {
           if (!attributes.font) return {};
+          ensureGoogleFontLoaded(attributes.font);
           return {
             style: `font-family: ${attributes.font}`,
           };
@@ -44,7 +51,9 @@ export const FontFamily = Mark.create({
       setFontFamily:
         (font: string) =>
         ({ commands }) => {
-          return commands.setMark(this.name, { font });
+          const resolved = resolveFontFamilyValue(font);
+          ensureGoogleFontLoaded(resolved);
+          return commands.setMark(this.name, { font: resolved });
         },
       unsetFontFamily:
         () =>
@@ -54,4 +63,3 @@ export const FontFamily = Mark.create({
     };
   },
 });
-

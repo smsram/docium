@@ -1,7 +1,7 @@
 /**
  * Markdown to HTML Converter for DOCIUM Document Editor
  * Transforms Markdown and plain text into clean, canonical HTML for Tiptap & ProseMirror.
- * Correctly parses headings, paragraphs, lists, tables, callouts, blockquotes, and formatting marks.
+ * Preserves Word/Google Docs natural flow without injecting artificial mid-content page breaks.
  */
 
 export function escapeHtml(str: string): string {
@@ -14,19 +14,66 @@ export function escapeHtml(str: string): string {
 }
 
 function formatInline(text: string): string {
-  return text
-    // Code
+  // Stash inline LaTeX ($...$ and \(...\)) before running Markdown italic/underscore rules
+  const latexTokens: string[] = [];
+  const stashLatex = (expr: string) => {
+    const idx = latexTokens.length;
+    const clean = expr.trim();
+    latexTokens.push(
+      `<span data-type="docium-inline-equation" data-latex="${escapeHtml(clean)}">${escapeHtml(clean)}</span>`
+    );
+    return `\u0000LATEX${idx}\u0000`;
+  };
+
+  let s = text
+    .replace(/\\\(([\s\S]+?)\\\)/g, (_m, inner) => stashLatex(inner))
+    .replace(/(?<!\\)\$(?!\d+(?:[.,]\d+)?(?:\s|$|[.,;!?)]))([^$\n]+?)\$/g, (_m, inner) => stashLatex(inner));
+
+  s = s
     .replace(/`([^`]+)`/g, '<code>$1</code>')
-    // Bold
+    .replace(/\*\*\*(.*?)\*\*\*/g, '<strong><em>$1</em></strong>')
     .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
     .replace(/__(.*?)__/g, '<strong>$1</strong>')
-    // Italic
     .replace(/\*([^*]+)\*/g, '<em>$1</em>')
     .replace(/_([^_]+)_/g, '<em>$1</em>')
-    // Strike
     .replace(/~~(.*?)~~/g, '<s>$1</s>')
-    // Links [text](url)
     .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2">$1</a>');
+
+  return s.replace(/\u0000LATEX(\d+)\u0000/g, (_m, i) => latexTokens[Number(i)] || '');
+}
+
+/**
+ * Converts pasted Markdown + LaTeX ($$...$$, \[...\], $...$, \(...\), **, *, #, lists, tables)
+ * into rich WYSIWYG HTML with rendered LaTeX formula nodes.
+ */
+export function convertMarkdownAndLatexToHtml(rawInput: string): string {
+  if (!rawInput || !rawInput.trim()) return '<p></p>';
+  // Normalize block LaTeX delimiters ($$...$$ and \[...\]) onto isolated blocks before passing to Markdown parser
+  const blockLatexTokens: string[] = [];
+  const withStashedBlocks = rawInput
+    .replace(/\$\$([\s\S]+?)\$\$/g, (_m, inner) => {
+      const idx = blockLatexTokens.length;
+      const clean = inner.trim();
+      blockLatexTokens.push(
+        `<div data-type="docium-equation" data-latex="${escapeHtml(clean)}">${escapeHtml(clean)}</div>`
+      );
+      return `\n\n__DOCIUM_BLOCK_LATEX_${idx}__\n\n`;
+    })
+    .replace(/\\\[([\s\S]+?)\\\]/g, (_m, inner) => {
+      const idx = blockLatexTokens.length;
+      const clean = inner.trim();
+      blockLatexTokens.push(
+        `<div data-type="docium-equation" data-latex="${escapeHtml(clean)}">${escapeHtml(clean)}</div>`
+      );
+      return `\n\n__DOCIUM_BLOCK_LATEX_${idx}__\n\n`;
+    });
+
+  let html = convertMarkdownToDocumentHtml(withStashedBlocks);
+  html = html.replace(/<p>__DOCIUM_BLOCK_LATEX_(\d+)__<\/p>|__DOCIUM_BLOCK_LATEX_(\d+)__/g, (_m, a, b) => {
+    const idx = Number(a ?? b);
+    return blockLatexTokens[idx] || '';
+  });
+  return html;
 }
 
 /**
@@ -41,11 +88,14 @@ export function isHtmlContent(content: string): boolean {
       trimmed.startsWith('<h2') ||
       trimmed.startsWith('<h3') ||
       trimmed.startsWith('<h4') ||
+      trimmed.startsWith('<h5') ||
+      trimmed.startsWith('<h6') ||
       trimmed.startsWith('<ul') ||
       trimmed.startsWith('<ol') ||
       trimmed.startsWith('<table') ||
       trimmed.startsWith('<div') ||
       trimmed.startsWith('<blockquote') ||
+      trimmed.startsWith('<hr') ||
       trimmed.endsWith('>'))
   );
 }
@@ -60,12 +110,10 @@ export function convertMarkdownToDocumentHtml(mdOrHtml: string): string {
 
   const raw = mdOrHtml.trim();
 
-  // If already full HTML, return as-is
   if (isHtmlContent(raw)) {
     return raw;
   }
 
-  // Clean conversational AI prefixes if present (e.g., "Certainly! Here is the content:\n\n# ...")
   let clean = raw;
   const preambleMatch = clean.match(/^(?:Sure!|Certainly!|Here (?:is|are)|I'll|I have|Of course)[^\n]*\n+/i);
   if (preambleMatch && clean.length > preambleMatch[0].length + 15) {
@@ -75,11 +123,6 @@ export function convertMarkdownToDocumentHtml(mdOrHtml: string): string {
   const lines = clean.split(/\r?\n/);
   const htmlParts: string[] = [];
   let i = 0;
-
-  // Track estimated height of content on current page to ensure multi-program and multi-section
-  // content automatically flows across physical A4 pages (~880px printable height)
-  const MAX_PAGE_CONTENT_PX = 860;
-  let currentPageHeightPx = 0;
 
   while (i < lines.length) {
     const line = lines[i];
@@ -91,108 +134,96 @@ export function convertMarkdownToDocumentHtml(mdOrHtml: string): string {
       continue;
     }
 
-    // 2. Fenced Code Block (```lang or ~~~lang)
+    // 2. Explicit Page Break token (\pagebreak, [PAGE_BREAK], <!-- pagebreak -->)
+    if (/^(\\pagebreak|\\newpage|\[page[_\s-]?break\]|<!--\s*pagebreak\s*-->)$/i.test(trimmed)) {
+      htmlParts.push('<div data-type="page-break" class="docium-page-break"></div>');
+      i++;
+      continue;
+    }
+
+    // 3. Fenced Code Block (```lang or ~~~lang)
     const codeFenceMatch = line.match(/^([ \t]*)(`{3,}|~{3,})([a-zA-Z0-9_+-]*)/);
     if (codeFenceMatch) {
-      const fenceMarker = codeFenceMatch[2][0]; // '`' or '~'
+      const fenceMarker = codeFenceMatch[2][0];
       const fenceLength = codeFenceMatch[2].length;
-      const language = codeFenceMatch[3].trim() || 'python';
-      i++; // Skip opening fence line
+      const language = codeFenceMatch[3].trim() || 'plaintext';
+      i++;
 
       const codeLines: string[] = [];
       const closeFencePattern = new RegExp(`^[ \\t]*${fenceMarker === '`' ? '`' : '~'}{${fenceLength},}[ \\t]*$`);
 
       while (i < lines.length) {
         if (closeFencePattern.test(lines[i])) {
-          i++; // Skip closing fence line
+          i++;
           break;
         }
-        // Strictly preserve exact indentation, blank lines, and whitespace!
         codeLines.push(lines[i]);
         i++;
       }
 
-      // If existing content on this page + code block exceeds page capacity, start a new page
-      const estimatedCodeHeight = codeLines.length * 21 + 36;
-      if (currentPageHeightPx > 0 && currentPageHeightPx + estimatedCodeHeight > MAX_PAGE_CONTENT_PX) {
-        htmlParts.push('<div data-type="page-break" class="docium-page-break"></div>');
-        currentPageHeightPx = 0;
-      }
-
-      // Check if code block itself is longer than page capacity (~38 lines):
-      // Cleanly split at line breaks across physical page boundaries
-      const MAX_LINES_PER_CODE_PAGE = 36;
-      if (codeLines.length > MAX_LINES_PER_CODE_PAGE + 6) {
-        let lineOffset = 0;
-        while (lineOffset < codeLines.length) {
-          const chunk = codeLines.slice(lineOffset, lineOffset + MAX_LINES_PER_CODE_PAGE);
-          lineOffset += MAX_LINES_PER_CODE_PAGE;
-
-          const escapedChunk = escapeHtml(chunk.join('\n'));
-          const langClass = language ? ` class="language-${escapeHtml(language)}"` : '';
-          htmlParts.push(`<pre><code${langClass}>${escapedChunk}</code></pre>`);
-
-          if (lineOffset < codeLines.length) {
-            htmlParts.push('<div data-type="page-break" class="docium-page-break"></div>');
-            currentPageHeightPx = 0;
-          } else {
-            currentPageHeightPx = chunk.length * 21 + 36;
-          }
-        }
-      } else {
-        const escapedCode = escapeHtml(codeLines.join('\n'));
-        const langClass = language ? ` class="language-${escapeHtml(language)}"` : '';
-        htmlParts.push(`<pre><code${langClass}>${escapedCode}</code></pre>`);
-        currentPageHeightPx += estimatedCodeHeight;
-      }
+      const escapedCode = escapeHtml(codeLines.join('\n'));
+      const langClass = language ? ` class="language-${escapeHtml(language)}"` : '';
+      htmlParts.push(`<pre><code${langClass}>${escapedCode}</code></pre>`);
       continue;
     }
 
-    // 3. Headings (# H1 to ###### H6)
+    // 4. Headings (# H1 to ###### H6)
     const headingMatch = trimmed.match(/^(#{1,6})\s+(.+)$/);
     if (headingMatch) {
-      const level = headingMatch[1].length;
+      const level = Math.min(6, headingMatch[1].length);
       const text = formatInline(escapeHtml(headingMatch[2].trim()));
-      const headingHeight = level === 1 ? 50 : level === 2 ? 40 : 30;
-
-      // When a major heading (H1) arrives and page already has substantial content (> 350px),
-      // or if adding this heading exceeds page budget, start on next physical page!
-      if (
-        currentPageHeightPx > 0 &&
-        ((level === 1 && currentPageHeightPx > 350) || currentPageHeightPx + headingHeight > MAX_PAGE_CONTENT_PX)
-      ) {
-        htmlParts.push('<div data-type="page-break" class="docium-page-break"></div>');
-        currentPageHeightPx = 0;
-      }
-
       htmlParts.push(`<h${level}>${text}</h${level}>`);
-      currentPageHeightPx += headingHeight;
       i++;
       continue;
     }
 
-    // 4. Page break or horizontal rule (--- or ***)
+    // 5. Horizontal Rule (--- or *** or ___) -> real <hr>, NOT an unexpected page break!
     if (/^(\-{3,}|\*{3,}|_{3,})$/.test(trimmed)) {
-      htmlParts.push('<div data-type="page-break" class="docium-page-break"></div>');
-      currentPageHeightPx = 0;
+      htmlParts.push('<hr />');
       i++;
       continue;
     }
 
-    // 5. Blockquote (> quote)
+    // 6. Callout or Blockquote (> [!NOTE] or > quote)
     if (trimmed.startsWith('>')) {
       const quoteLines: string[] = [];
       while (i < lines.length && lines[i].trim().startsWith('>')) {
-        quoteLines.push(lines[i].trim().replace(/^>\s*/, ''));
+        quoteLines.push(lines[i].trim().replace(/^>\s?/, ''));
         i++;
       }
-      const quoteContent = quoteLines.map((l) => formatInline(escapeHtml(l))).join(' ');
-      htmlParts.push(`<blockquote><p>${quoteContent}</p></blockquote>`);
-      currentPageHeightPx += quoteLines.length * 24 + 20;
+
+      const firstLine = quoteLines[0] || '';
+      const alertMatch = firstLine.match(/^\[!(NOTE|TIP|IMPORTANT|WARNING|CAUTION|INFO|DANGER)\]\s*(.*)$/i);
+      if (alertMatch) {
+        const rawType = alertMatch[1].toUpperCase();
+        const calloutType =
+          rawType === 'TIP'
+            ? 'tip'
+            : rawType === 'WARNING'
+            ? 'warning'
+            : rawType === 'CAUTION' || rawType === 'DANGER'
+            ? 'danger'
+            : rawType === 'NOTE'
+            ? 'note'
+            : 'info';
+        const restFirst = alertMatch[2].trim();
+        const bodyLines = [restFirst, ...quoteLines.slice(1)].filter((l) => l.trim().length > 0);
+        const innerHtml =
+          bodyLines.length > 0
+            ? bodyLines.map((l) => `<p>${formatInline(escapeHtml(l))}</p>`).join('')
+            : '<p></p>';
+        htmlParts.push(`<div data-type="callout" data-callout-type="${calloutType}">${innerHtml}</div>`);
+      } else {
+        const quoteContent = quoteLines
+          .filter((l) => l.length > 0)
+          .map((l) => `<p>${formatInline(escapeHtml(l))}</p>`)
+          .join('');
+        htmlParts.push(`<blockquote>${quoteContent || '<p></p>'}</blockquote>`);
+      }
       continue;
     }
 
-    // 5. Tables (| col 1 | col 2 |)
+    // 7. Tables (| col 1 | col 2 |)
     if (trimmed.startsWith('|') && trimmed.endsWith('|')) {
       const tableLines: string[] = [];
       while (i < lines.length && lines[i].trim().startsWith('|') && lines[i].trim().endsWith('|')) {
@@ -206,7 +237,6 @@ export function convertMarkdownToDocumentHtml(mdOrHtml: string): string {
           .split('|')
           .map((c) => formatInline(escapeHtml(c.trim())));
 
-        // Check if line 1 is separator (e.g. |---|---|)
         const isSep = /^[:\s\-\|]+$/.test(tableLines[1]);
         const dataStartIndex = isSep ? 2 : 1;
 
@@ -235,10 +265,31 @@ export function convertMarkdownToDocumentHtml(mdOrHtml: string): string {
       }
     }
 
-    // 6. Unordered lists (- item, * item)
+    // 8. Task lists (- [ ] item, - [x] item)
+    if (/^[-*]\s+\[([ xX])\]\s+/.test(trimmed)) {
+      const taskItems: { checked: boolean; text: string }[] = [];
+      while (i < lines.length && /^[-*]\s+\[([ xX])\]\s+/.test(lines[i].trim())) {
+        const m = lines[i].trim().match(/^[-*]\s+\[([ xX])\]\s+(.+)$/);
+        if (m) {
+          taskItems.push({
+            checked: m[1].toLowerCase() === 'x',
+            text: formatInline(escapeHtml(m[2])),
+          });
+        }
+        i++;
+      }
+      htmlParts.push(
+        `<ul data-type="taskList">${taskItems
+          .map((it) => `<li data-type="taskItem" data-checked="${it.checked}"><p>${it.text}</p></li>`)
+          .join('')}</ul>`
+      );
+      continue;
+    }
+
+    // 9. Unordered lists (- item, * item)
     if (/^[-*]\s+/.test(trimmed)) {
       const items: string[] = [];
-      while (i < lines.length && /^[-*]\s+/.test(lines[i].trim())) {
+      while (i < lines.length && /^[-*]\s+/.test(lines[i].trim()) && !/^[-*]\s+\[([ xX])\]\s+/.test(lines[i].trim())) {
         const itemText = lines[i].trim().replace(/^[-*]\s+/, '');
         items.push(formatInline(escapeHtml(itemText)));
         i++;
@@ -247,7 +298,7 @@ export function convertMarkdownToDocumentHtml(mdOrHtml: string): string {
       continue;
     }
 
-    // 7. Ordered lists (1. item, 2. item)
+    // 10. Ordered lists (1. item, 2. item)
     if (/^\d+\.\s+/.test(trimmed)) {
       const items: string[] = [];
       while (i < lines.length && /^\d+\.\s+/.test(lines[i].trim())) {
@@ -259,7 +310,7 @@ export function convertMarkdownToDocumentHtml(mdOrHtml: string): string {
       continue;
     }
 
-    // 8. Regular paragraph (collect contiguous non-blank lines)
+    // 11. Regular paragraph
     const pLines: string[] = [];
     while (
       i < lines.length &&
@@ -271,7 +322,8 @@ export function convertMarkdownToDocumentHtml(mdOrHtml: string): string {
       !lines[i].trim().startsWith('|') &&
       !/^[-*]\s+/.test(lines[i].trim()) &&
       !/^\d+\.\s+/.test(lines[i].trim()) &&
-      !/^(\-{3,}|\*{3,}|_{3,})$/.test(lines[i].trim())
+      !/^(\-{3,}|\*{3,}|_{3,})$/.test(lines[i].trim()) &&
+      !/^(\\pagebreak|\\newpage|\[page[_\s-]?break\]|<!--\s*pagebreak\s*-->)$/i.test(lines[i].trim())
     ) {
       pLines.push(lines[i].trim());
       i++;
@@ -280,10 +332,8 @@ export function convertMarkdownToDocumentHtml(mdOrHtml: string): string {
     if (pLines.length > 0) {
       const pText = formatInline(escapeHtml(pLines.join(' ')));
       htmlParts.push(`<p>${pText}</p>`);
-      currentPageHeightPx += Math.max(24, Math.ceil(pText.length / 80) * 22 + 10);
     }
   }
 
   return htmlParts.length > 0 ? htmlParts.join('') : `<p>${formatInline(escapeHtml(clean))}</p>`;
 }
-

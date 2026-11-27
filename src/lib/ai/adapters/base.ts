@@ -30,7 +30,7 @@ export interface NormalizedToolDefinition {
   };
 }
 
-export type StreamChunkType = 'delta' | 'tool_call' | 'done' | 'error';
+export type StreamChunkType = 'delta' | 'reasoning' | 'tool_call' | 'done' | 'error';
 
 export interface NormalizedStreamChunk {
   type: StreamChunkType;
@@ -55,6 +55,7 @@ export interface AdapterOptions {
   maxTokens?: number;
   signal?: AbortSignal;
   preferredPairIndex?: number;
+  fastFailOn429?: boolean;
   onCredentialActive?: (info: { providerId: ProviderId; index: number; accountId?: string }) => void;
 }
 

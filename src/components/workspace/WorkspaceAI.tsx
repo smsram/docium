@@ -88,6 +88,7 @@ export function WorkspaceAI({
   const fileInputRef = useRef<HTMLInputElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
+  const triggeredInitialPromptRef = useRef<string | null>(null);
 
   // Idempotent initialization of workspace conversation
   useEffect(() => {
@@ -137,27 +138,119 @@ export function WorkspaceAI({
     providers.serpapi?.apiKey
   );
 
-  // Enabled tools state (stored per conversation or defaulted)
-  const [enabledTools, setEnabledTools] = useState({
-    internetSearch: activeConversation?.selectedTools?.internetSearch ?? isSearchConfigured,
-    imageGeneration: activeConversation?.selectedTools?.imageGeneration ?? false,
-    chartsAndData: activeConversation?.selectedTools?.chartsAndData ?? true,
-  });
+  const sessionToolsKey = `docium:session-tools:${workspaceId || 'global'}`;
 
-  // Sync tools when active conversation changes (render-phase adjustment without cascading effect)
-  const [prevConversationId, setPrevConversationId] = useState(activeConversation?.id);
-  if (prevConversationId !== activeConversation?.id) {
-    setPrevConversationId(activeConversation?.id);
-    setEnabledTools({
+  const readSessionTools = useCallback(() => {
+    if (typeof window !== 'undefined') {
+      try {
+        const raw = window.sessionStorage.getItem(sessionToolsKey);
+        if (raw) {
+          const parsed = JSON.parse(raw);
+          return {
+            internetSearch: Boolean(parsed.internetSearch),
+            imageGeneration: Boolean(parsed.imageGeneration),
+            chartsAndData: parsed.chartsAndData !== undefined ? Boolean(parsed.chartsAndData) : true,
+          };
+        }
+      } catch {
+        // Ignore storage read errors
+      }
+    }
+    return {
       internetSearch: activeConversation?.selectedTools?.internetSearch ?? isSearchConfigured,
       imageGeneration: activeConversation?.selectedTools?.imageGeneration ?? false,
       chartsAndData: activeConversation?.selectedTools?.chartsAndData ?? true,
-    });
+    };
+  }, [sessionToolsKey, activeConversation?.selectedTools, isSearchConfigured]);
+
+  // Enabled tools state (persisted in sessionStorage and conversation store across page refreshes)
+  const [enabledTools, setEnabledTools] = useState(readSessionTools);
+
+  // Sync tools when active conversation or workspace changes
+  const [prevConversationId, setPrevConversationId] = useState(activeConversation?.id);
+  if (prevConversationId !== activeConversation?.id) {
+    setPrevConversationId(activeConversation?.id);
+    setEnabledTools(readSessionTools());
   }
 
   const handleToggleTool = (toolKey: 'internetSearch' | 'imageGeneration' | 'chartsAndData', val: boolean) => {
-    setEnabledTools((prev) => ({ ...prev, [toolKey]: val }));
+    const next = { ...enabledTools, [toolKey]: val };
+    setEnabledTools(next);
+    if (typeof window !== 'undefined') {
+      try {
+        window.sessionStorage.setItem(sessionToolsKey, JSON.stringify(next));
+      } catch {
+        // Ignore storage write errors
+      }
+    }
+    if (activeConversation && workspaceId) {
+      useWorkspaceStore.setState((state) => {
+        const list = state.documentConversations?.[workspaceId];
+        if (!Array.isArray(list)) return state;
+        return {
+          documentConversations: {
+            ...state.documentConversations,
+            [workspaceId]: list.map((c) =>
+              c.id === activeConversation.id
+                ? { ...c, selectedTools: { ...c.selectedTools, [toolKey]: val } }
+                : c
+            ),
+          },
+        };
+      });
+    }
   };
+
+  // Automatically trigger live AI generation when workspace was created with an initialPrompt from the main page
+  useEffect(() => {
+    if (!workspaceId || !activeConversation) return;
+    if (triggeredInitialPromptRef.current === workspaceId) return;
+
+    const currentItem =
+      documents.find((d) => d.id === workspaceId) ||
+      sheets.find((s) => s.id === workspaceId) ||
+      slides.find((sl) => sl.id === workspaceId);
+
+    const pendingPrompt = currentItem?.initialPrompt?.trim();
+    if (!pendingPrompt) return;
+    if (activeConversation.messages && activeConversation.messages.length > 0) return;
+
+    triggeredInitialPromptRef.current = workspaceId;
+
+    // Clear initialPrompt from store so refreshing the page does not re-run it
+    if (documentFormat === 'doc') {
+      updateDocument(workspaceId, { initialPrompt: undefined });
+    }
+
+    // Ensure AI panel is docked and visible while it works
+    updateAiPanelState(workspaceId, { mode: 'docked' });
+
+    let cancelled = false;
+    const startLiveWork = async () => {
+      if (documentFormat === 'doc') {
+        await editorRegistry.waitForEditor(workspaceId, 2000);
+      }
+      if (!cancelled) {
+        handleSendMessage(pendingPrompt);
+      }
+    };
+
+    const timer = setTimeout(startLiveWork, 120);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [
+    workspaceId,
+    activeConversation?.id,
+    activeConversation?.messages?.length,
+    documents,
+    sheets,
+    slides,
+    documentFormat,
+    updateDocument,
+    updateAiPanelState,
+  ]);
 
   // ==========================================
   // SEND MESSAGE & ORCHESTRATION STREAMING
@@ -442,9 +535,12 @@ export function WorkspaceAI({
               const mergedUpdates = [...(prev.updates || [])];
               if (evt.updates && evt.updates.length > 0) {
                 for (const u of evt.updates) {
-                  const uIdx = mergedUpdates.findIndex((x) => x.id === u.id);
+                  const uTrim = (u.content || '').trim();
+                  const uIdx = mergedUpdates.findIndex(
+                    (x) => x.id === u.id || (uTrim && (x.content || '').trim() === uTrim)
+                  );
                   if (uIdx !== -1) {
-                    mergedUpdates[uIdx] = u;
+                    mergedUpdates[uIdx] = { ...mergedUpdates[uIdx], ...u };
                   } else {
                     mergedUpdates.push(u);
                   }
@@ -467,7 +563,10 @@ export function WorkspaceAI({
             if (existingIdx !== -1) {
               const prev = accumulatedEvents[existingIdx];
               const mergedUpdates = [...(prev.updates || [])];
-              const uIdx = mergedUpdates.findIndex((x) => x.id === update.id);
+              const uTrim = (update.content || '').trim();
+              const uIdx = mergedUpdates.findIndex(
+                (x) => x.id === update.id || (uTrim && (x.content || '').trim() === uTrim)
+              );
               if (uIdx !== -1) {
                 mergedUpdates[uIdx] = update;
               } else {
@@ -543,8 +642,8 @@ export function WorkspaceAI({
               if (res) actionResult = res;
             }
 
-            // Fallback to central editorRegistry if prop didn't handle or reported missing editor
-            if (!actionResult || (!actionResult.success && actionResult.error?.includes('No active document editor'))) {
+            // Fallback to central editorRegistry only if onApplyEditorAction prop was not provided
+            if (!actionResult) {
               const targetDoc = (event.payload?.documentId as string) || workspaceId;
               const regResult = await editorRegistry.executeAction(
                 event.action,

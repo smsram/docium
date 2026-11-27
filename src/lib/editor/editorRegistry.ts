@@ -25,6 +25,11 @@ import {
   replaceAllMatches,
   moveDocumentSectionInEditor,
 } from './documentSearch';
+import {
+  resolveFontFamilyValue,
+  normalizeFontSizeToPt,
+  ensureGoogleFontLoaded,
+} from './fontCatalog';
 
 export interface RegisteredEditorEntry {
   documentId: string;
@@ -53,6 +58,9 @@ export type DocumentPersistCallback = (
     firstPageFooterText?: string;
     showPageNumbers?: boolean;
     differentFirstPage?: boolean;
+    watermarkText?: string;
+    pageColor?: string;
+    pageBorder?: 'none' | 'box' | 'shadow' | 'double' | 'accent';
   }
 ) => void;
 
@@ -383,6 +391,62 @@ class DocumentEditorRegistry {
         };
       }
 
+      if (action === 'insert_hyperlink') {
+        const url = String(payload.url || '').trim();
+        if (!url) {
+          return {
+            success: false,
+            status: 'INVALID_ARGUMENTS',
+            statusCode: 'INVALID_ARGUMENTS',
+            error: 'A non-empty URL is required for insert_hyperlink.',
+            documentId,
+            action,
+          };
+        }
+        const text = payload.text ? String(payload.text) : undefined;
+        const targetText = payload.targetText ? String(payload.targetText).trim() : undefined;
+        const escapeAttr = (s: string) =>
+          s.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        const escapeRegExp = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+        const prevContent = doc.content || '';
+        let newContent = prevContent;
+        let changed = false;
+
+        if (targetText) {
+          const linkHtml = `<a href="${escapeAttr(url)}">${escapeHtml(text || targetText)}</a>`;
+          // Replace targetText only outside HTML tag attributes (<...>)
+          const re = new RegExp(`(>[^<]*?)(${escapeRegExp(targetText)})`, 'i');
+          if (re.test(prevContent)) {
+            newContent = prevContent.replace(re, `$1${linkHtml}`);
+            changed = newContent !== prevContent;
+          }
+        }
+
+        if (!changed) {
+          const anchor = `<a href="${escapeAttr(url)}">${escapeHtml(text || targetText || url)}</a>`;
+          newContent = prevContent && prevContent !== '<p></p>' ? `${prevContent}<p>${anchor}</p>` : `<p>${anchor}</p>`;
+          changed = true;
+        }
+
+        store.updateDocument(documentId, {
+          content: newContent,
+          updatedAt: new Date().toISOString(),
+        });
+
+        return {
+          success: true,
+          status: 'inserted',
+          statusCode: 'SUCCESS',
+          changed,
+          contentChanged: changed,
+          documentId,
+          action,
+          summary: `Inserted hyperlink to "${url}"`,
+          persisted: true,
+        };
+      }
+
       return null;
     } catch {
       return null;
@@ -585,9 +649,15 @@ export function executeEditorTransaction(
     }
 
     case 'replace_selected_text': {
-      const rawText = String(payload.text || '');
+      const targetText = payload.targetText ? String(payload.targetText) : undefined;
+      const rawText = String(payload.replacementText ?? payload.text ?? '');
       const htmlContent = convertMarkdownToDocumentHtml(rawText);
-      if (editor.state.selection.empty) {
+      if (targetText) {
+        const count = replaceAllMatches(editor, targetText, rawText);
+        if (count === 0 && !editor.state.selection.empty) {
+          editor.chain().focus().deleteSelection().insertContent(htmlContent).run();
+        }
+      } else if (editor.state.selection.empty) {
         editor.chain().focus().insertContent(htmlContent).run();
       } else {
         editor.chain().focus().deleteSelection().insertContent(htmlContent).run();
@@ -890,14 +960,74 @@ export function executeEditorTransaction(
     }
 
     case 'insert_hyperlink': {
-      const url = String(payload.url || '');
+      const url = String(payload.url || '').trim();
       const text = payload.text ? String(payload.text) : undefined;
-      if (!editor.state.selection.empty) {
+      const targetText = payload.targetText ? String(payload.targetText).trim() : undefined;
+      const escapeAttr = (s: string) => s.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+      const escapeHtml = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+      if (!url) {
+        return { success: false, error: 'A non-empty URL is required for insert_hyperlink.' };
+      }
+
+      if (targetText) {
+        const searchRes = searchProseMirrorDoc(editor.state.doc, { query: targetText });
+        if (searchRes.totalMatches > 0) {
+          for (let i = searchRes.matches.length - 1; i >= 0; i--) {
+            const m = searchRes.matches[i];
+            if (text && text !== targetText) {
+              editor
+                .chain()
+                .focus()
+                .insertContentAt({ from: m.from, to: m.to }, `<a href="${escapeAttr(url)}">${escapeHtml(text)}</a>`)
+                .run();
+            } else {
+              editor
+                .chain()
+                .focus()
+                .setTextSelection({ from: m.from, to: m.to })
+                .extendMarkRange('link')
+                .setLink({ href: url })
+                .run();
+            }
+          }
+          // If the target text already had this exact link href, treat as idempotent success rather than failing
+          if (editor.getHTML() === initialHtml) {
+            return {
+              success: true,
+              documentId,
+              action,
+              contentChanged: false,
+              persisted: true,
+            };
+          }
+        } else if (text) {
+          editor.chain().focus('end').insertContent(`<a href="${escapeAttr(url)}">${escapeHtml(text)}</a>`).run();
+        } else {
+          return {
+            success: false,
+            error: `Target text "${targetText}" not found in document.`,
+            documentId,
+            action,
+            contentChanged: false,
+            persisted: false,
+          };
+        }
+      } else if (!editor.state.selection.empty && !text) {
         editor.chain().focus().extendMarkRange('link').setLink({ href: url }).run();
+        if (editor.getHTML() === initialHtml) {
+          return {
+            success: true,
+            documentId,
+            action,
+            contentChanged: false,
+            persisted: true,
+          };
+        }
       } else if (text) {
-        editor.chain().focus().insertContent(`<a href="${url}">${text}</a>`).run();
+        editor.chain().focus().insertContent(`<a href="${escapeAttr(url)}">${escapeHtml(text)}</a>`).run();
       } else {
-        editor.chain().focus().insertContent(`<a href="${url}">${url}</a>`).run();
+        editor.chain().focus().insertContent(`<a href="${escapeAttr(url)}">${escapeHtml(url)}</a>`).run();
       }
       break;
     }
@@ -908,15 +1038,27 @@ export function executeEditorTransaction(
       const targetText = payload.targetText ? String(payload.targetText).trim() : undefined;
 
       const applyMarkToChain = (chain: any) => {
-        if (fmt === 'bold') chain.toggleBold();
-        else if (fmt === 'italic') chain.toggleItalic();
-        else if (fmt === 'underline') chain.toggleUnderline();
-        else if (fmt === 'strike') chain.toggleStrike();
-        else if (fmt === 'subscript') chain.toggleSubscript();
+        if (fmt === 'bold') {
+          if (payload.enabled === true) chain.setBold();
+          else if (payload.enabled === false) chain.unsetBold();
+          else chain.toggleBold();
+        } else if (fmt === 'italic') {
+          if (payload.enabled === true) chain.setItalic();
+          else if (payload.enabled === false) chain.unsetItalic();
+          else chain.toggleItalic();
+        } else if (fmt === 'underline') {
+          if (payload.enabled === true) chain.setUnderline();
+          else if (payload.enabled === false) chain.unsetUnderline();
+          else chain.toggleUnderline();
+        } else if (fmt === 'strike') {
+          if (payload.enabled === true) chain.setStrike();
+          else if (payload.enabled === false) chain.unsetStrike();
+          else chain.toggleStrike();
+        } else if (fmt === 'subscript') chain.toggleSubscript();
         else if (fmt === 'superscript') chain.toggleSuperscript();
         else if (fmt === 'code') chain.toggleCode();
         else if (fmt === 'color') chain.setColor(val || '#000000');
-        else if (fmt === 'highlight') chain.toggleHighlight({ color: val || '#fef08a' });
+        else if (fmt === 'highlight') chain.setHighlight({ color: val || '#fef08a' });
         else if (fmt === 'clear') chain.unsetAllMarks().clearNodes();
         chain.run();
       };
@@ -936,6 +1078,13 @@ export function executeEditorTransaction(
             action,
           };
         }
+      } else if (editor.state.selection.empty) {
+        const docSize = editor.state.doc.content.size;
+        if (docSize > 0) {
+          const prevPos = editor.state.selection.from;
+          applyMarkToChain(editor.chain().setTextSelection({ from: 0, to: docSize }));
+          editor.commands.setTextSelection(Math.min(prevPos, editor.state.doc.content.size));
+        }
       } else {
         applyMarkToChain(editor.chain().focus());
       }
@@ -943,8 +1092,11 @@ export function executeEditorTransaction(
     }
 
     case 'set_font_style': {
-      const fontFamily = payload.fontFamily ? String(payload.fontFamily) : undefined;
-      const fontSize = payload.fontSize ? String(payload.fontSize) : undefined;
+      const rawFontFamily = payload.fontFamily ? String(payload.fontFamily) : undefined;
+      const fontFamily = rawFontFamily ? resolveFontFamilyValue(rawFontFamily) : undefined;
+      if (fontFamily) ensureGoogleFontLoaded(fontFamily);
+      const rawFontSize = payload.fontSize !== undefined && payload.fontSize !== null ? payload.fontSize : undefined;
+      const fontSize = rawFontSize !== undefined ? normalizeFontSizeToPt(rawFontSize as string | number) : undefined;
       const targetText = payload.targetText ? String(payload.targetText).trim() : undefined;
 
       const applyFontToChain = (chain: any) => {
@@ -959,6 +1111,13 @@ export function executeEditorTransaction(
           const m = searchRes.matches[i];
           applyFontToChain(editor.chain().setTextSelection({ from: m.from, to: m.to }));
         }
+      } else if (editor.state.selection.empty) {
+        const docSize = editor.state.doc.content.size;
+        if (docSize > 0) {
+          const prevPos = editor.state.selection.from;
+          applyFontToChain(editor.chain().setTextSelection({ from: 0, to: docSize }));
+          editor.commands.setTextSelection(Math.min(prevPos, editor.state.doc.content.size));
+        }
       } else {
         applyFontToChain(editor.chain().focus());
       }
@@ -966,20 +1125,63 @@ export function executeEditorTransaction(
     }
 
     case 'set_line_height': {
-      const lh = payload.lineHeight ? String(payload.lineHeight) : undefined;
-      const spaceBefore = Boolean(payload.spaceBefore);
-      const spaceAfter = Boolean(payload.spaceAfter);
-      const chain = editor.chain().focus();
-      if (lh) chain.setLineHeight(lh);
-      if (spaceBefore) chain.updateAttributes('paragraph', { style: 'margin-top: 14px' });
-      if (spaceAfter) chain.updateAttributes('paragraph', { style: 'margin-bottom: 14px' });
-      chain.run();
+      const rawLh = payload.lineHeight !== undefined && payload.lineHeight !== null ? String(payload.lineHeight).trim() : undefined;
+      const lh = rawLh === '1' ? '1.0' : rawLh === '2' ? '2.0' : rawLh === '3' ? '3.0' : rawLh;
+      const spaceBefore = payload.spaceBefore !== undefined ? Boolean(payload.spaceBefore) : undefined;
+      const spaceAfter = payload.spaceAfter !== undefined ? Boolean(payload.spaceAfter) : undefined;
+      const marginTopPx = typeof payload.marginTopPx === 'number' ? `${payload.marginTopPx}px` : spaceBefore !== undefined ? (spaceBefore ? '14px' : '0px') : undefined;
+      const marginBottomPx = typeof payload.marginBottomPx === 'number' ? `${payload.marginBottomPx}px` : spaceAfter !== undefined ? (spaceAfter ? '14px' : '0px') : undefined;
+      const targetText = payload.targetText ? String(payload.targetText).trim() : undefined;
+
+      const applySpacingToChain = (chain: any) => {
+        if (lh) chain.setLineHeight(lh);
+        if (marginTopPx !== undefined || marginBottomPx !== undefined) {
+          chain.setParagraphSpacing({
+            ...(marginTopPx !== undefined ? { marginTop: marginTopPx } : {}),
+            ...(marginBottomPx !== undefined ? { marginBottom: marginBottomPx } : {}),
+          });
+        }
+        chain.run();
+      };
+
+      if (targetText) {
+        const searchRes = searchProseMirrorDoc(editor.state.doc, { query: targetText });
+        for (let i = searchRes.matches.length - 1; i >= 0; i--) {
+          const m = searchRes.matches[i];
+          applySpacingToChain(editor.chain().setTextSelection({ from: m.from, to: m.to }));
+        }
+      } else if (editor.state.selection.empty || payload.scope === 'all') {
+        const docSize = editor.state.doc.content.size;
+        if (docSize > 0) {
+          const prevPos = editor.state.selection.from;
+          applySpacingToChain(editor.chain().setTextSelection({ from: 0, to: docSize }));
+          editor.commands.setTextSelection(Math.min(prevPos, editor.state.doc.content.size));
+        }
+      } else {
+        applySpacingToChain(editor.chain().focus());
+      }
       break;
     }
 
     case 'change_document_alignment': {
       const align = (payload.alignment as 'left' | 'center' | 'right' | 'justify') || 'left';
-      editor.chain().focus().setTextAlign(align).run();
+      const targetText = payload.targetText ? String(payload.targetText).trim() : undefined;
+      if (targetText) {
+        const searchRes = searchProseMirrorDoc(editor.state.doc, { query: targetText });
+        for (let i = searchRes.matches.length - 1; i >= 0; i--) {
+          const m = searchRes.matches[i];
+          editor.chain().setTextSelection({ from: m.from, to: m.to }).setTextAlign(align).run();
+        }
+      } else if (editor.state.selection.empty || payload.scope === 'all') {
+        const docSize = editor.state.doc.content.size;
+        if (docSize > 0) {
+          const prevPos = editor.state.selection.from;
+          editor.chain().setTextSelection({ from: 0, to: docSize }).setTextAlign(align).run();
+          editor.commands.setTextSelection(Math.min(prevPos, editor.state.doc.content.size));
+        }
+      } else {
+        editor.chain().focus().setTextAlign(align).run();
+      }
       break;
     }
 
@@ -995,12 +1197,36 @@ export function executeEditorTransaction(
         shapeType: (payload.shapeType as any) || 'rectangle',
         width: Number(payload.width || 180),
         height: Number(payload.height || 110),
-        fill: String(payload.fill || '#E7EAE4'),
+        fill: String(payload.fill || '#EAF2ED'),
         stroke: String(payload.stroke || '#245C45'),
-        strokeWidth: Number(payload.strokeWidth || 2),
-        rotation: 0,
-        alignment: 'center',
+        strokeWidth: Number(payload.strokeWidth ?? 2),
+        strokeStyle: (payload.strokeStyle as any) || 'solid',
+        rotation: Number(payload.rotation || 0),
+        alignment: (payload.alignment as any) || 'center',
+        text: payload.text ? String(payload.text) : '',
+        textColor: payload.textColor ? String(payload.textColor) : undefined,
       }).run();
+      break;
+    }
+
+    case 'insert_text_box': {
+      editor.chain().focus().insertTextBox({
+        width: Number(payload.width ?? 0),
+        minHeight: Number(payload.minHeight ?? 64),
+        fill: String(payload.fill || '#F8FAF9'),
+        borderColor: String(payload.borderColor || '#245C45'),
+        borderWidth: Number(payload.borderWidth ?? 1),
+        borderStyle: (payload.borderStyle as any) || 'solid',
+        alignment: (payload.alignment as any) || 'full',
+        shadow: Boolean(payload.shadow),
+        contentHtml: payload.text ? String(payload.text) : payload.content ? String(payload.content) : 'Text box content...',
+      }).run();
+      break;
+    }
+
+    case 'insert_equation': {
+      const latex = String(payload.latex || payload.expression || 'E = mc^2');
+      editor.chain().focus().insertEquation({ latex, displayMode: payload.displayMode !== false }).run();
       break;
     }
 
@@ -1009,6 +1235,199 @@ export function executeEditorTransaction(
       const alt = payload.alt ? String(payload.alt) : undefined;
       const title = payload.title ? String(payload.title) : undefined;
       editor.chain().focus().setImage({ src: url, alt, title }).run();
+      break;
+    }
+
+    case 'insert_chart': {
+      const chartType = (String(payload.chartType || 'column').toLowerCase()) as 'column' | 'bar' | 'line' | 'pie' | 'doughnut';
+      const chartTitle = String(payload.title || 'Chart');
+      const labels = Array.isArray(payload.labels) ? payload.labels.map(String) : ['Q1', 'Q2', 'Q3', 'Q4'];
+      const values = Array.isArray(payload.values) ? payload.values.map((v) => Number(v) || 0) : [25, 50, 75, 100];
+      const subtitle = payload.subtitle ? String(payload.subtitle) : '';
+      const palette = ['#245C45', '#398568', '#54B68E', '#84CC16', '#0D9488', '#1E40AF', '#2563EB'];
+
+      // Render high-DPI 2x PNG chart via offscreen canvas so it renders cleanly in Editor AND native OpenXML .docx
+      let chartDataUrl = '';
+      if (typeof document !== 'undefined') {
+        const logicalW = 540;
+        const logicalH = 320;
+        const canvas = document.createElement('canvas');
+        canvas.width = logicalW * 2;
+        canvas.height = logicalH * 2;
+        const ctx = canvas.getContext('2d');
+        if (ctx) {
+          ctx.scale(2, 2);
+          ctx.fillStyle = '#FFFFFF';
+          ctx.fillRect(0, 0, logicalW, logicalH);
+          ctx.strokeStyle = '#E2E8F0';
+          ctx.lineWidth = 1;
+          ctx.strokeRect(0.5, 0.5, logicalW - 1, logicalH - 1);
+
+          ctx.fillStyle = '#171C19';
+          ctx.font = 'bold 15px Calibri, Arial, sans-serif';
+          ctx.textAlign = 'center';
+          ctx.fillText(chartTitle, logicalW / 2, 28);
+          if (subtitle) {
+            ctx.fillStyle = '#64748B';
+            ctx.font = '11px Calibri, Arial, sans-serif';
+            ctx.fillText(subtitle, logicalW / 2, 46);
+          }
+
+          const count = Math.max(1, Math.min(labels.length, values.length));
+          const safeLabels = labels.slice(0, count);
+          const safeVals = values.slice(0, count);
+
+          if (chartType === 'pie' || chartType === 'doughnut') {
+            const total = safeVals.reduce((a, b) => a + Math.max(0, b), 0) || 1;
+            const cx = logicalW * 0.38;
+            const cy = 185;
+            const r = 92;
+            let startAngle = -Math.PI / 2;
+            safeVals.forEach((v, idx) => {
+              const sliceAngle = (Math.max(0, v) / total) * Math.PI * 2;
+              ctx.beginPath();
+              ctx.moveTo(cx, cy);
+              ctx.arc(cx, cy, r, startAngle, startAngle + sliceAngle);
+              ctx.closePath();
+              ctx.fillStyle = palette[idx % palette.length];
+              ctx.fill();
+              ctx.strokeStyle = '#FFFFFF';
+              ctx.lineWidth = 2;
+              ctx.stroke();
+              startAngle += sliceAngle;
+            });
+            if (chartType === 'doughnut') {
+              ctx.beginPath();
+              ctx.arc(cx, cy, r * 0.52, 0, Math.PI * 2);
+              ctx.fillStyle = '#FFFFFF';
+              ctx.fill();
+            }
+            ctx.textAlign = 'left';
+            safeLabels.forEach((lbl, idx) => {
+              const ly = 96 + idx * 24;
+              const pct = Math.round((Math.max(0, safeVals[idx]) / total) * 100);
+              ctx.fillStyle = palette[idx % palette.length];
+              ctx.fillRect(logicalW * 0.65, ly - 9, 12, 12);
+              ctx.fillStyle = '#1E293B';
+              ctx.font = '11px Calibri, Arial, sans-serif';
+              ctx.fillText(`${lbl.slice(0, 18)}: ${safeVals[idx]} (${pct}%)`, logicalW * 0.65 + 18, ly + 1);
+            });
+          } else {
+            const padLeft = chartType === 'bar' ? 115 : 58;
+            const padRight = 28;
+            const padTop = 64;
+            const padBottom = 48;
+            const plotW = logicalW - padLeft - padRight;
+            const plotH = logicalH - padTop - padBottom;
+            const maxVal = Math.max(...safeVals, 1) * 1.15;
+
+            ctx.strokeStyle = '#CBD5E1';
+            ctx.beginPath();
+            ctx.moveTo(padLeft, padTop);
+            ctx.lineTo(padLeft, padTop + plotH);
+            ctx.lineTo(padLeft + plotW, padTop + plotH);
+            ctx.stroke();
+
+            if (chartType === 'bar') {
+              const slotH = plotH / count;
+              const barH = Math.min(28, slotH * 0.58);
+              safeVals.forEach((v, idx) => {
+                const bw = (Math.max(0, v) / maxVal) * plotW;
+                const by = padTop + idx * slotH + (slotH - barH) / 2;
+                ctx.fillStyle = palette[idx % palette.length];
+                ctx.fillRect(padLeft, by, bw, barH);
+                ctx.fillStyle = '#1E293B';
+                ctx.font = 'bold 10px Calibri, Arial, sans-serif';
+                ctx.textAlign = 'left';
+                ctx.fillText(String(v), padLeft + bw + 5, by + barH / 2 + 3);
+                ctx.fillStyle = '#475569';
+                ctx.textAlign = 'right';
+                ctx.fillText(safeLabels[idx].slice(0, 16), padLeft - 8, by + barH / 2 + 3);
+              });
+            } else if (chartType === 'line') {
+              const stepX = count > 1 ? plotW / (count - 1) : plotW / 2;
+              const pts = safeVals.map((v, idx) => ({
+                x: count > 1 ? padLeft + idx * stepX : padLeft + plotW / 2,
+                y: padTop + plotH - (Math.max(0, v) / maxVal) * plotH,
+              }));
+              ctx.strokeStyle = palette[0];
+              ctx.lineWidth = 2.5;
+              ctx.beginPath();
+              pts.forEach((pt, idx) => (idx === 0 ? ctx.moveTo(pt.x, pt.y) : ctx.lineTo(pt.x, pt.y)));
+              ctx.stroke();
+              pts.forEach((pt, idx) => {
+                ctx.beginPath();
+                ctx.arc(pt.x, pt.y, 4, 0, Math.PI * 2);
+                ctx.fillStyle = '#FFFFFF';
+                ctx.fill();
+                ctx.strokeStyle = palette[0];
+                ctx.lineWidth = 2.5;
+                ctx.stroke();
+                ctx.fillStyle = '#1E293B';
+                ctx.font = 'bold 10px Calibri, Arial, sans-serif';
+                ctx.textAlign = 'center';
+                ctx.fillText(String(safeVals[idx]), pt.x, pt.y - 8);
+                ctx.fillStyle = '#475569';
+                ctx.fillText(safeLabels[idx].slice(0, 12), pt.x, padTop + plotH + 16);
+              });
+            } else {
+              const slotW = plotW / count;
+              const barW = Math.min(44, slotW * 0.56);
+              safeVals.forEach((v, idx) => {
+                const bh = (Math.max(0, v) / maxVal) * plotH;
+                const bx = padLeft + idx * slotW + (slotW - barW) / 2;
+                const by = padTop + plotH - bh;
+                ctx.fillStyle = palette[idx % palette.length];
+                ctx.fillRect(bx, by, barW, bh);
+                ctx.fillStyle = '#1E293B';
+                ctx.font = 'bold 10px Calibri, Arial, sans-serif';
+                ctx.textAlign = 'center';
+                ctx.fillText(String(v), bx + barW / 2, by - 5);
+                ctx.fillStyle = '#475569';
+                ctx.fillText(safeLabels[idx].slice(0, 12), bx + barW / 2, padTop + plotH + 16);
+              });
+            }
+          }
+          chartDataUrl = canvas.toDataURL('image/png');
+        }
+      }
+
+      if (chartDataUrl) {
+        const chartNode = {
+          type: 'image',
+          attrs: {
+            src: chartDataUrl,
+            alt: chartTitle,
+            title: chartTitle,
+            width: 480,
+            height: 285,
+            alignment: 'center',
+            caption: `Chart: ${chartTitle}`,
+          },
+        };
+        if (payload.afterHeading) {
+          let targetPos: number | null = null;
+          const searchHeading = String(payload.afterHeading).toLowerCase();
+          editor.state.doc.descendants((node, pos) => {
+            if (
+              targetPos === null &&
+              node.type?.name === 'heading' &&
+              node.textContent.toLowerCase().includes(searchHeading)
+            ) {
+              targetPos = pos + node.nodeSize;
+            }
+          });
+          if (targetPos !== null) {
+            editor.chain().focus().insertContentAt(targetPos, chartNode).run();
+          } else {
+            editor.chain().focus('end').insertContent(chartNode).run();
+          }
+        } else if (payload.position === 'cursor') {
+          editor.chain().focus().insertContent(chartNode).run();
+        } else {
+          editor.chain().focus('end').insertContent(chartNode).run();
+        }
+      }
       break;
     }
 
@@ -1033,6 +1452,9 @@ export function executeEditorTransaction(
         footerText: payload.footerText,
         showPageNumbers: payload.showPageNumbers,
         differentFirstPage: payload.differentFirstPage,
+        watermarkText: payload.watermarkText,
+        pageColor: payload.pageColor,
+        pageBorder: payload.pageBorder,
       };
       break;
     }
@@ -1533,8 +1955,9 @@ export function executeEditorTransaction(
 
     case 'format_all_headings': {
       const reqLevel = typeof payload.level === 'number' ? payload.level : undefined;
-      const fontFamily = payload.fontFamily ? String(payload.fontFamily) : undefined;
-      const fontSize = typeof payload.fontSize === 'number' ? `${payload.fontSize}px` : undefined;
+      const fontFamily = payload.fontFamily ? resolveFontFamilyValue(String(payload.fontFamily)) : undefined;
+      if (fontFamily) ensureGoogleFontLoaded(fontFamily);
+      const fontSize = payload.fontSize !== undefined ? normalizeFontSizeToPt(payload.fontSize as string | number) : undefined;
       const color = payload.color ? String(payload.color) : undefined;
       const alignment = payload.alignment as 'left' | 'center' | 'right' | 'justify' | undefined;
 
@@ -1559,8 +1982,9 @@ export function executeEditorTransaction(
 
     case 'format_all_paragraphs': {
       const align = payload.alignment as 'left' | 'center' | 'right' | 'justify' | undefined;
-      const fontSize = typeof payload.fontSize === 'number' ? `${payload.fontSize}px` : undefined;
-      const fontFamily = payload.fontFamily ? String(payload.fontFamily) : undefined;
+      const fontSize = payload.fontSize !== undefined ? normalizeFontSizeToPt(payload.fontSize as string | number) : undefined;
+      const fontFamily = payload.fontFamily ? resolveFontFamilyValue(String(payload.fontFamily)) : undefined;
+      if (fontFamily) ensureGoogleFontLoaded(fontFamily);
       const pRanges: { from: number; to: number }[] = [];
       editor.state.doc.descendants((node, pos) => {
         if (node.type?.name === 'paragraph') {
@@ -1611,15 +2035,17 @@ export function executeEditorTransaction(
           const m = res.matches[i];
           editor.chain()
             .setTextSelection({ from: m.from, to: m.to })
-            .unsetBold()
-            .unsetItalic()
-            .unsetStrike()
-            .unsetHighlight()
-            .unsetFontFamily()
+            .unsetAllMarks()
+            .unsetLineHeight()
             .run();
         }
+      } else if (editor.state.selection.empty) {
+        const docSize = editor.state.doc.content.size;
+        if (docSize > 0) {
+          editor.chain().setTextSelection({ from: 0, to: docSize }).unsetAllMarks().unsetLineHeight().run();
+        }
       } else {
-        editor.chain().focus().clearNodes().unsetAllMarks().run();
+        editor.chain().focus().unsetAllMarks().unsetLineHeight().run();
       }
       break;
     }
@@ -1680,6 +2106,10 @@ export function executeEditorTransaction(
     'delete_empty_paragraphs',
     'update_table_cell',
     'clear_table_contents',
+    'set_line_height',
+    'set_font_style',
+    'change_document_alignment',
+    'format_document_text',
   ]);
 
   if (!contentChanged && !nonContentActions.has(action)) {

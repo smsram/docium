@@ -875,9 +875,7 @@ export const useWorkspaceStore = create<WorkspaceState>()(
         };
 
         if (type === 'doc') {
-          const docContent = templateContent !== undefined
-            ? templateContent
-            : (title ? `<h1>${title}</h1><p></p>` : '<p></p>');
+          const docContent = templateContent !== undefined ? templateContent : '<p></p>';
           const docWordCount = docContent.replace(/<[^>]+>/g, ' ').trim().split(/\s+/).filter(Boolean).length;
           const newDoc: DocumentItem = {
             ...base,
@@ -888,6 +886,7 @@ export const useWorkspaceStore = create<WorkspaceState>()(
             pageSize: 'A4',
             orientation: 'portrait',
             margins: 'normal',
+            showPageNumbers: false,
           };
           set((state) => ({ documents: [newDoc, ...state.documents] }));
         } else if (type === 'sheet') {
@@ -1789,15 +1788,8 @@ export const useWorkspaceStore = create<WorkspaceState>()(
         };
 
         if (determinedType === 'doc') {
-          let docContent = '<p></p>';
-          let docWordCount = 0;
-          if (initialContent !== undefined) {
-            docContent = initialContent;
-            docWordCount = initialContent.replace(/<[^>]+>/g, ' ').trim().split(/\s+/).filter(Boolean).length;
-          } else if (trimmedPrompt) {
-            docContent = `<h1>${cleanTitle}</h1><p></p>`;
-            docWordCount = cleanTitle.split(/\s+/).filter(Boolean).length;
-          }
+          const docContent = initialContent !== undefined ? initialContent : '<p></p>';
+          const docWordCount = docContent.replace(/<[^>]+>/g, ' ').trim().split(/\s+/).filter(Boolean).length;
 
           const newDoc: DocumentItem = {
             ...base,
@@ -1808,6 +1800,7 @@ export const useWorkspaceStore = create<WorkspaceState>()(
             pageSize: 'A4',
             orientation: 'portrait',
             margins: 'normal',
+            showPageNumbers: false,
           };
           set((state) => ({ documents: [newDoc, ...state.documents] }));
         } else if (determinedType === 'sheet') {
@@ -1882,25 +1875,8 @@ export const useWorkspaceStore = create<WorkspaceState>()(
           set((state) => ({ slides: [newSlide, ...state.slides] }));
         }
 
-        // Initialize dedicated AI conversation for this item (only if prompt was provided)
-        const initialAiMessages: AiChatMessage[] = trimmedPrompt
-          ? [
-              {
-                id: `msg-${Date.now()}-1`,
-                role: 'user',
-                content: trimmedPrompt,
-                timestamp: 'Just now',
-                attachments: attachments.map((a) => ({ name: a.name, size: a.size, type: a.type })),
-                sources: urls,
-              },
-              {
-                id: `msg-${Date.now()}-2`,
-                role: 'assistant',
-                content: `I've created your **${determinedType === 'doc' ? 'Document' : determinedType === 'sheet' ? 'Spreadsheet' : 'Presentation'}** workspace based on your instructions.`,
-                timestamp: 'Just now',
-              },
-            ]
-          : [];
+        // Initialize dedicated AI conversation for this item (empty messages so WorkspaceAI starts the live work upon navigation)
+        const initialAiMessages: AiChatMessage[] = [];
 
         const initialConvId = `conv-${id}-1`;
         const initialConversation: WorkspaceConversation = {
@@ -2027,6 +2003,8 @@ export const useWorkspaceStore = create<WorkspaceState>()(
           sources: sanitizeSources(state.sources),
           notifications: state.notifications,
           sidebarCollapsed: state.sidebarCollapsed,
+          outlinePanelOpen: state.outlinePanelOpen,
+          zoomLevel: state.zoomLevel,
           theme: state.theme,
           userProfile: state.userProfile,
           apiKeys: state.apiKeys,

@@ -446,9 +446,12 @@ export class StreamingSessionManager {
       const mergedUpdates = [...(prev.updates || [])];
       if (event.updates && event.updates.length > 0) {
         for (const u of event.updates) {
-          const uIdx = mergedUpdates.findIndex((x) => x.id === u.id);
+          const uTrim = (u.content || '').trim();
+          const uIdx = mergedUpdates.findIndex(
+            (x) => x.id === u.id || (uTrim && (x.content || '').trim() === uTrim)
+          );
           if (uIdx !== -1) {
-            mergedUpdates[uIdx] = u;
+            mergedUpdates[uIdx] = { ...mergedUpdates[uIdx], ...u };
           } else {
             mergedUpdates.push(u);
           }
@@ -496,7 +499,10 @@ export class StreamingSessionManager {
     if (existingIdx !== -1) {
       const prev = nextEvents[existingIdx];
       const mergedUpdates = [...(prev.updates || [])];
-      const uIdx = mergedUpdates.findIndex((x) => x.id === update.id);
+              const uTrim = (update.content || '').trim();
+              const uIdx = mergedUpdates.findIndex(
+                (x) => x.id === update.id || (uTrim && (x.content || '').trim() === uTrim)
+              );
       if (uIdx !== -1) {
         mergedUpdates[uIdx] = update;
       } else {

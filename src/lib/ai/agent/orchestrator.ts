@@ -25,6 +25,90 @@ import { parseCloudflarePairs, CloudflarePair } from '../credentials';
 import { buildSharedAgentSystemPrompt } from './systemPrompt';
 import { getOriginalFile } from '@/lib/storage/sourceStorage';
 import { normalizeBase64DataUrl } from '../adapters/cloudflare';
+import { convertMarkdownToDocumentHtml } from '@/components/editor/utils/markdownToHtml';
+
+/**
+ * Mirrors dispatched browser editor actions onto the server's in-memory activeDocContext
+ * so subsequent read_document_content / get_document_links / verify_document_state calls
+ * within the same agent turn see up-to-date HTML and links instead of stale Round 0 state.
+ */
+function applyEditorActionToShadowDoc(
+  doc: ActiveDocumentContext | undefined,
+  action: string,
+  payload: Record<string, unknown>
+): void {
+  if (!doc) return;
+  const html = doc.content || '';
+  const escapeAttr = (s: string) =>
+    s.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const escapeHtml = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const escapeRegExp = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+  if (action === 'clear_current_page') {
+    doc.content = '<p></p>';
+    doc.wordCount = 0;
+    doc.characterCount = 0;
+    return;
+  }
+
+  if (action === 'insert_text' || action === 'insert_structured_document' || action === 'append_or_insert_paragraph') {
+    const raw = String(payload.content || payload.text || '');
+    if (!raw) return;
+    const converted = convertMarkdownToDocumentHtml(raw);
+    const isEmpty = !html.trim() || html.trim() === '<p></p>' || html.trim() === '<p><br></p>';
+    doc.content = isEmpty ? converted : `${html}${converted}`;
+    return;
+  }
+
+  if (action === 'insert_hyperlink') {
+    const url = String(payload.url || '').trim();
+    if (!url) return;
+    const text = payload.text ? String(payload.text) : undefined;
+    const targetText = payload.targetText ? String(payload.targetText).trim() : undefined;
+    if (targetText) {
+      const linkHtml = `<a href="${escapeAttr(url)}">${escapeHtml(text || targetText)}</a>`;
+      const re = new RegExp(`(>[^<]*?)(${escapeRegExp(targetText)})`, 'i');
+      if (re.test(html)) {
+        doc.content = html.replace(re, `$1${linkHtml}`);
+        return;
+      }
+    }
+    const anchor = `<a href="${escapeAttr(url)}">${escapeHtml(text || targetText || url)}</a>`;
+    const isEmpty = !html.trim() || html.trim() === '<p></p>';
+    doc.content = isEmpty ? `<p>${anchor}</p>` : `${html}<p>${anchor}</p>`;
+    return;
+  }
+
+  if (action === 'replace_section') {
+    const headingTitle = String(payload.headingTitle || payload.headingText || '').trim();
+    const newBody = convertMarkdownToDocumentHtml(String(payload.newContent || ''));
+    if (!headingTitle) return;
+    const headingRe = new RegExp(`(<h([1-6])[^>]*>[^<]*${escapeRegExp(headingTitle)}[^<]*<\\/h\\2>)([\\s\\S]*?)(?=<h[1-6][^>]*>|$)`, 'i');
+    if (headingRe.test(html)) {
+      doc.content = html.replace(headingRe, `$1${newBody}`);
+    }
+    return;
+  }
+
+  if (action === 'replace_text') {
+    const find = String(payload.searchText || payload.oldText || payload.targetText || '');
+    const rep = String(payload.replaceText || payload.newText || '');
+    if (find) {
+      doc.content = html.split(find).join(escapeHtml(rep));
+    }
+    return;
+  }
+
+  if (action === 'delete_hyperlinks') {
+    const targetText = payload.targetText ? String(payload.targetText).trim() : undefined;
+    if (targetText) {
+      const re = new RegExp(`<a[^>]*>([^<]*${escapeRegExp(targetText)}[^<]*)<\\/a>`, 'gi');
+      doc.content = html.replace(re, '$1');
+    } else {
+      doc.content = html.replace(/<a[^>]*>([\s\S]*?)<\/a>/gi, '$1');
+    }
+  }
+}
 
 export interface AgentRunParams {
   requestId?: string;
@@ -692,18 +776,28 @@ export function isLiveResearchRequired(userPrompt: string): boolean {
 export function extractSearchQuery(userPrompt: string): string {
   let q = userPrompt.trim();
 
-  // Strip leading action phrases:
-  q = q.replace(/^(please\s+)?(can\s+you\s+)?(search(\s+for|\s+the\s+web\s+for|\s+online\s+for)?|look\s*up|find(\s+out\s+about|\s+the|\s+me)?|google|browse\s+for)\s+/i, '');
+  // Strip leading document/workspace action phrases (e.g. "Remove existing content and place...", "Find and place...")
+  q = q.replace(/^(?:please\s+)?(?:can\s+you\s+)?(?:(?:remove|clear|delete)\s+(?:the\s+)?(?:existing|current|all)\s+(?:content|text|page)\s+and\s+)?(?:search(?:\s+for|\s+the\s+web\s+for|\s+online\s+for)?|look\s*up|find(?:\s+out\s+about|\s+the|\s+me)?|google|browse\s+for)\s+(?:and\s+(?:place|insert|put|add|write|create|draft)\s+)?/i, '');
+  q = q.replace(/^(?:place|insert|put|add|write|create|draft)\s+/i, '');
 
-  // Strip trailing file operation / presentation clauses:
+  // Strip trailing styling, chart, and file-operation clauses
+  q = q.replace(/\s+and\s+(?:make\s+it\s+look(?:\s+good)?|style\s+it|format\s+it|use\s+best\s+font|you\s+(?:might|can|should)\s+use\s+(?:charts?|graphs?|tables?)|with\s+(?:best\s+)?font|including\s+(?:charts?|graphs?)).*$/i, '');
+  q = q.replace(/\s+with\s+(?:best\s+)?(?:font|fonts|styling|formatting|colors|charts?|graphs?).*$/i, '');
   q = q.replace(/\s+and\s+(update|write|save|store|add|append|put|create|record|log)\s+(it\s+)?(to|in|into|my)?\s+([a-zA-Z0-9_\-\.\s]+)?(document|file|workspace|notes?|doc).*$/i, '');
   q = q.replace(/\s+and\s+(compare\s+them|give\s+me\s+a\s+summary|summarize\s+them|put\s+it\s+in\s+a\s+table).*$/i, '');
 
   // Strip leading question markers
   q = q.replace(/^(what\s+are\s+the|what\s+is\s+the|tell\s+me\s+about\s+the|who\s+is\s+the)\s+/i, '');
 
+  // Normalize "until now" / "up to now" to current year for cleaner web search results
+  const currentYear = String(new Date().getFullYear());
+  if (/\b(?:until\s+now|up\s+to\s+now|so\s+far|to\s+date|latest)\b/i.test(q) && !/\b20\d{2}\b/.test(q)) {
+    q = q.replace(/\b(?:until\s+now|up\s+to\s+now|so\s+far|to\s+date)\b/gi, '').trim();
+    q = `${q} ${currentYear}`.trim();
+  }
+
   // Strip ending punctuation
-  q = q.replace(/[?!.]+$/, '').trim();
+  q = q.replace(/[?!.,]+$/, '').trim();
 
   // If query became too short or empty, fall back to cleaned prompt
   if (q.length < 3) {
@@ -753,31 +847,32 @@ export function detectFileOperationIntent(userPrompt: string): {
 export function isDocumentActionRequest(userPrompt: string): boolean {
   const clean = userPrompt.trim().toLowerCase();
 
-  // 1. Direct placement, update, or creation intent on document/page
+  // 1. Direct placement, preparation, update, or creation intent on document/page
   if (
-    /\b(place|insert|add|put|write|append|prepend|type|include|draft|create|generate|populate|update|modify|edit|fill)\b[\s\S]*?\b(page|document|doc|content|section|paragraph|heading|table|list|text|intro|introduction|report|here|editor|summary|overview|about)\b/i.test(clean)
+    /\b(prepare|place|insert|add|put|write|append|prepend|type|include|draft|create|generate|populate|update|modify|edit|fill|build|compile|compose|produce|summarize|outline|design|construct|craft|format|style)\b[\s\S]*?\b(page|document|doc|content|section|paragraph|heading|table|list|text|intro|introduction|report|here|editor|summary|overview|about|guide|article|essay|spec|specification|models)\b/i.test(clean)
   ) {
     return true;
   }
 
-  // 2. Direct document artifact creation ("Create a report on...", "Write an article about...", "Draft a summary of...")
+  // 2. Direct document artifact creation ("Prepare a document on...", "Create a report on...", "Write an article about...")
   if (
-    /\b(create|write|draft|generate|make|build)\s+(?:a\s+|an\s+)?(?:detailed\s+|comprehensive\s+|short\s+|quick\s+)?(?:report|article|summary|essay|guide|section|outline|overview|table|list|comparison|document|page)\b/i.test(clean)
+    /\b(prepare|create|write|draft|generate|make|build|compile|compose|produce)\s+(?:a\s+|an\s+|the\s+)?(?:detailed\s+|comprehensive\s+|complete\s+|full\s+|short\s+|quick\s+|new\s+|styled\s+)?(?:report|article|summary|essay|guide|section|outline|overview|table|list|comparison|document|doc|page|note|notes|catalog)\b/i.test(clean)
   ) {
     return true;
   }
 
-  // 3. Formatting and styling actions
+  // 3. Formatting, spacing, font, and styling actions
   if (
-    /\b(make|change|format|bold|italic|underline|align|style|heading|h1|h2|h3|h4|h5|h6|center|justify|indent|colorize|highlight)\b[\s\S]*?\b(heading|paragraph|title|text|section|line|selection|table|list|page)\b/i.test(clean) ||
-    /\bmake\s+(?:the|this|that)\s+.*?\s+(?:heading|bold|italic|underline|center)/i.test(clean)
+    /\b(make|change|set|format|bold|italic|underline|align|style|styling|heading|h1|h2|h3|h4|h5|h6|center|justify|indent|colorize|highlight|spacing|line\s*height|line\s*spacing|font)\b[\s\S]*?\b(heading|headings|paragraph|paragraphs|title|text|section|line|selection|table|list|page|document|doc|spacing|height|font|size|color|styling|1|1\.0|1\.15|1\.5|2|2\.0|single|double)\b/i.test(clean) ||
+    /\bmake\s+(?:the|this|that)?\s*.*?\s+(?:heading|bold|italic|underline|center|spacing)/i.test(clean) ||
+    /\b(?:spacing|line\s*spacing|line\s*height)\s*(?:as|to|=)?\s*(?:1|1\.0|1\.15|1\.5|2|2\.0|single|double)\b/i.test(clean)
   ) {
     return true;
   }
 
   // 4. Replacement, editing, or deletion actions
   if (
-    /\b(replace|rewrite|substitute|delete|remove|clear|rephrase|improve)\b[\s\S]*?\b(selection|selected|paragraph|sentence|text|heading|section|content|table|word)\b/i.test(clean)
+    /\b(replace|rewrite|substitute|delete|remove|clear|rephrase|improve)\b[\s\S]*?\b(selection|selected|paragraph|sentence|text|heading|section|content|table|word|with)\b/i.test(clean)
   ) {
     return true;
   }
@@ -934,7 +1029,8 @@ export function stripInternalReasoningTokens(text: string): string {
   return text
     .replace(/<think>[\s\S]*?<\/think>/gi, '')
     .replace(/<thought>[\s\S]*?<\/thought>/gi, '')
-    .replace(/<\/?(?:think|thought|internal_reasoning)>/gi, '');
+    .replace(/<\/?(?:think|thought|internal_reasoning)>/gi, '')
+    .replace(/<\|(?:im_end|im_start|endoftext|im_sep)\|>/gi, '');
 }
 
 export function isMetaNarration(text: string): boolean {
@@ -1054,6 +1150,38 @@ export async function* runAgentOrchestrator(params: AgentRunParams): AsyncIterab
   const dispatchedActionIds = new Set<string>();
   let fileOpExecuted = false;
   let editorActionExecuted = false;
+  let contentPlacementExecuted = false;
+  const requiresContentPlacement =
+    workspaceType === 'doc' &&
+    /\b(place|insert|write|create|draft|generate|prepare|build|add|put|replace|update|fill|compose|produce)\b/i.test(userPrompt);
+  const CONTENT_PLACEMENT_TOOLS = new Set([
+    'insert_text',
+    'insert_structured_document',
+    'insert_paragraph',
+    'append_or_insert_paragraph',
+    'append_content',
+    'prepend_content',
+    'insert_heading',
+    'create_or_edit_heading',
+    'insert_list',
+    'create_document_list',
+    'insert_table',
+    'insert_document_table',
+    'replace_table',
+    'insert_code_block',
+    'insert_callout',
+    'insert_shape',
+    'insert_text_box',
+    'insert_chart',
+    'insert_image',
+    'insert_equation',
+    'replace_text',
+    'replace_section',
+    'replace_paragraph',
+    'rewrite_content',
+    'expand_content',
+    'shorten_content',
+  ]);
 
   let stepOrder = 0;
   let eventSeq = 0;
@@ -1204,10 +1332,18 @@ export async function* runAgentOrchestrator(params: AgentRunParams): AsyncIterab
   // 2. Resolve Provider Adapter & Vision Capability Check
   const adapter = params.adapter || resolveProviderAdapter(providerId);
 
-  // Validate vision capability if image attachments are present
+  // Validate vision capability ONLY if images are attached in this turn or explicitly targeted by the prompt
+  const promptMentionsImage = /\b(image|photo|picture|screenshot|diagram|chart|visual|ocr|inspect|look at)\b/i.test(userPrompt);
+  const hasExplicitImageMention = Boolean(
+    params.explicitSourceIds?.some((sid) => {
+      const s = attachedSources.find((src) => src.id === sid);
+      return Boolean(s && (s.type === 'image' || s.mimeType?.startsWith('image/') || /\.(jpe?g|png|webp|gif|svg)$/i.test(s.title)));
+    })
+  );
   const hasImageAttachments =
-    (params.attachments && params.attachments.some((a) => a.type?.startsWith('image/'))) ||
-    attachedSources.some((s) => s.type === 'image' || s.mimeType?.startsWith('image/'));
+    Boolean(params.attachments && params.attachments.some((a) => a.type?.startsWith('image/'))) ||
+    hasExplicitImageMention ||
+    (promptMentionsImage && attachedSources.some((s) => s.type === 'image' || s.mimeType?.startsWith('image/')));
 
   if (hasImageAttachments) {
     const isVision = isVisionCapableModel(modelId, providerId);
@@ -1285,12 +1421,12 @@ export async function* runAgentOrchestrator(params: AgentRunParams): AsyncIterab
     imageGenProvider: 'cloudflare-flux',
   };
 
-  // 4. Dynamic Two-Layer Tool Discovery & Loading
-  const hasAttachments = attachedSources.length > 0 || Boolean(params.attachments && params.attachments.length > 0);
-  const isSourceReferenced =
-    hasAttachments ||
-    attachedSources.length > 0 ||
-    /pdf|source|file|attachment|program|extract|read|table/i.test(userPrompt);
+  // 4. Dynamic Two-Layer Tool Discovery & Loading (Lean, Intent-Driven Preloading)
+  const hasTurnAttachments = Boolean(params.attachments && params.attachments.length > 0);
+  const hasExplicitMentions = Boolean(params.explicitSourceIds && params.explicitSourceIds.length > 0);
+  const hasAttachments = attachedSources.length > 0 || hasTurnAttachments;
+  const promptReferencesSource = /\b(pdf|source|file|attachment|attached|upload|uploaded|program|extract)\b/i.test(userPrompt);
+  const isSourceReferenced = hasTurnAttachments || hasExplicitMentions || (attachedSources.length > 0 && promptReferencesSource);
   const toolsNeeded = shouldEnableToolsForPrompt(userPrompt, hasAttachments, enabledTools, params.workspaceType);
 
   const activeLoadedToolIds = new Set<string>();
@@ -1303,28 +1439,89 @@ export async function* runAgentOrchestrator(params: AgentRunParams): AsyncIterab
     activeLoadedToolIds.add('read_source_content');
     activeLoadedToolIds.add('read_pdf_page');
     activeLoadedToolIds.add('search_pdf_content');
-    activeLoadedToolIds.add('inspect_source_image');
+    if (hasImageAttachments) {
+      activeLoadedToolIds.add('inspect_source_image');
+    }
     activeLoadedToolIds.add('get_task_scratchpad');
     activeLoadedToolIds.add('update_task_scratchpad');
   }
 
-  // In Document workspaces, essential editing, verification, and source tools are available by default
+  // In Document workspaces, preload a lean core set (~24 tools) + intent-matched clusters
+  // instead of all 54 tools on every round (cuts input token usage by ~70% per round!)
   if (params.workspaceType === 'doc') {
-    activeLoadedToolIds.add('insert_text');
-    activeLoadedToolIds.add('insert_paragraph');
-    activeLoadedToolIds.add('insert_structured_document');
-    activeLoadedToolIds.add('insert_code_block');
-    activeLoadedToolIds.add('replace_text');
-    activeLoadedToolIds.add('replace_selected_text');
-    activeLoadedToolIds.add('clear_current_page');
-    activeLoadedToolIds.add('read_active_document');
-    activeLoadedToolIds.add('read_active_document_structure');
-    activeLoadedToolIds.add('inspect_active_document_metadata');
-    activeLoadedToolIds.add('verify_document_state');
-    activeLoadedToolIds.add('get_task_scratchpad');
-    activeLoadedToolIds.add('update_task_scratchpad');
+    const coreDocTools = [
+      // Reading & navigation
+      'read_document_content',
+      'find_document_content',
+      'get_document_structure',
+      // Core edits (text-level)
+      'insert_text',
+      'replace_text',
+      'replace_section',
+      'delete_content',
+      'clear_current_page',
+      // Structural composition (headings, paragraphs, lists, appending)
+      'insert_heading',
+      'insert_paragraph',
+      'insert_list',
+      'append_content',
+      'prepend_content',
+      // Formatting
+      'apply_text_formatting',
+      'set_line_spacing',
+      'set_font_family',
+      'set_font_size',
+      'format_all_headings',
+      'verify_document_state',
+      // Scratchpad memory — always available so the model can track multi-step progress
+      'get_task_scratchpad',
+      'update_task_scratchpad',
+    ];
+    for (const id of coreDocTools) {
+      activeLoadedToolIds.add(id);
+    }
 
-    // Preload source reading and inspection tools whenever sources/attachments exist or are referenced:
+    // Conditionally load specialized clusters only when prompt intent matches
+    if (/\b(table|tables|row|rows|column|columns|cell|cells|comparison)\b/i.test(userPrompt)) {
+      activeLoadedToolIds.add('insert_table');
+      activeLoadedToolIds.add('replace_table');
+    }
+    if (/\b(code|program|programs|script|python|javascript|typescript|java|c\+\+|snippet|function)\b/i.test(userPrompt)) {
+      activeLoadedToolIds.add('insert_code_block');
+    }
+    if (/\b(margin|margins|page\s*size|a4|letter|legal|orientation|landscape|portrait|header|footer|page\s*number|page\s*break|watermark|page\s*color|page\s*border)\b/i.test(userPrompt)) {
+      activeLoadedToolIds.add('set_page_size');
+      activeLoadedToolIds.add('set_page_orientation');
+      activeLoadedToolIds.add('set_page_margins');
+      activeLoadedToolIds.add('update_header');
+      activeLoadedToolIds.add('update_footer');
+      activeLoadedToolIds.add('insert_page_numbers');
+      activeLoadedToolIds.add('insert_page_break');
+      activeLoadedToolIds.add('insert_watermark');
+    }
+    if (/\b(shape|shapes|rectangle|circle|ellipse|arrow|diamond|star|flowchart|banner|text\s*box|textbox|sidebar\s*box|equation|formula|math)\b/i.test(userPrompt)) {
+      activeLoadedToolIds.add('insert_shape');
+      activeLoadedToolIds.add('insert_text_box');
+      activeLoadedToolIds.add('insert_equation');
+    }
+    if (/\b(chart|charts|graph|graphs|plot|visual|diagram)\b/i.test(userPrompt)) {
+      activeLoadedToolIds.add('insert_chart');
+    }
+    if (/\b(align|alignment|center|justify|bold|italic|underline|strike|color|highlight|spacing|paragraph|style|styling|callout)\b/i.test(userPrompt)) {
+      activeLoadedToolIds.add('set_text_alignment');
+      activeLoadedToolIds.add('format_all_paragraphs');
+      activeLoadedToolIds.add('set_font_color');
+      activeLoadedToolIds.add('set_highlight_color');
+      activeLoadedToolIds.add('set_paragraph_spacing');
+      activeLoadedToolIds.add('insert_callout');
+    }
+    // Web search: load when prompt involves research, news, latest info, or document creation from scratch
+    if (/\b(search|find|look up|research|latest|recent|current|news|update|google|web|internet|until now|as of|today)\b/i.test(userPrompt) ||
+        /\b(prepare|create|write|draft|generate|make)\b.*\b(document|report|article|paper|post|content)\b/i.test(userPrompt)) {
+      activeLoadedToolIds.add('web_search');
+    }
+
+    // Preload source reading tools ONLY when sources/attachments are actually referenced in this turn
     if (isSourceReferenced) {
       activeLoadedToolIds.add('list_sources');
       activeLoadedToolIds.add('get_source_details');
@@ -1332,26 +1529,24 @@ export async function* runAgentOrchestrator(params: AgentRunParams): AsyncIterab
       activeLoadedToolIds.add('read_source_content');
       activeLoadedToolIds.add('read_pdf_page');
       activeLoadedToolIds.add('search_pdf_content');
-      activeLoadedToolIds.add('inspect_source_image');
+      if (hasImageAttachments) {
+        activeLoadedToolIds.add('inspect_source_image');
+      }
     }
   }
 
-  // Proactively preload image and source tools if image attachments are present
+  // Proactively preload image tool ONLY when image is actually attached or targeted in this turn
   if (hasImageAttachments) {
     activeLoadedToolIds.add('inspect_source_image');
     activeLoadedToolIds.add('list_sources');
     activeLoadedToolIds.add('get_source_details');
-    activeLoadedToolIds.add('get_task_scratchpad');
-    activeLoadedToolIds.add('update_task_scratchpad');
-  } else if (hasAttachments) {
+  } else if (isSourceReferenced) {
     activeLoadedToolIds.add('list_sources');
     activeLoadedToolIds.add('get_source_details');
     activeLoadedToolIds.add('search_sources');
     activeLoadedToolIds.add('read_source_content');
     activeLoadedToolIds.add('read_pdf_page');
     activeLoadedToolIds.add('search_pdf_content');
-    activeLoadedToolIds.add('get_task_scratchpad');
-    activeLoadedToolIds.add('update_task_scratchpad');
   }
 
   // Hook up context.onLoadTools so load_tool_definitions activates tools for subsequent rounds
@@ -1663,6 +1858,40 @@ Report this exact API error to the user so they can verify their API key or prov
   const toolCallSignatures = new Map<string, number>();
   let consecutiveNoProgressRounds = 0;
 
+  // Per-response Task Progress Ledger & Read Deduplication Cache
+  // Ensures the agent remembers every step completed in this response and never re-reads unchanged content
+  let docRevision = 0;
+  const readResultCache = new Map<string, { revision: number; round: number; summary: string }>();
+  const ledgerCompletedSteps: string[] = [];
+
+  const buildCompactedMessagesForRound = (roundNum: number): NormalizedMessage[] => {
+    const recentCutoff = Math.max(2, messages.length - 4);
+    const compacted = messages.map((msg, idx) => {
+      // Compact older bulky tool payloads (> 1400 chars) so context tokens do not grow quadratically across rounds
+      if (idx < recentCutoff && msg.role === 'tool' && msg.content && msg.content.length > 1400) {
+        return {
+          ...msg,
+          content: `${msg.content.slice(0, 450)}\n...[Compacted ${msg.content.length} chars from earlier round; refer to Task Progress Ledger]`,
+        };
+      }
+      return msg;
+    });
+
+    // Inject compact Per-Response Task Progress Ledger into the system prompt on Round 2+
+    if (roundNum >= 2 && ledgerCompletedSteps.length > 0 && compacted.length > 0 && compacted[0].role === 'system') {
+      const ledgerBlock = `\n\n[CURRENT TASK PROGRESS LEDGER — ROUND ${roundNum}]\nCompleted steps in this response (DO NOT repeat these reads or edits):\n${ledgerCompletedSteps
+        .slice(-15)
+        .map((s) => `- ${s}`)
+        .join('\n')}\nDirective: Keep thinking under 50 words. Do NOT re-read unchanged content. Batch remaining edits into one round and finish cleanly.`;
+      compacted[0] = {
+        ...compacted[0],
+        content: compacted[0].content + ledgerBlock,
+      };
+    }
+
+    return compacted;
+  };
+
   // Retain the active eligible Cloudflare pair index across rounds within this agent task
   let activeCfPairIndex: number | undefined = undefined;
 
@@ -1690,6 +1919,9 @@ Report this exact API error to the user so they can verify their API key or prov
     console.log(`[DOCIUM AI Diagnostic] Agent stage: ${executionStage} | round: ${loopCount}/${dynamicBudget} | provider: ${providerId} | model: ${modelId}`);
 
     let assistantContent = '';
+    let roundReasoningContent = '';
+    let roundFinishReason: string | undefined = undefined;
+    let insideThinkTag = false;
     const pendingCalls: ToolCallRequest[] = [];
     // Only stream directly to final response if pure conversational request with no tools needed
     const isPureConversation = !toolsNeeded;
@@ -1707,17 +1939,64 @@ Report this exact API error to the user so they can verify their API key or prov
     }
 
     let roundBufferedDeltas: string[] = [];
+    let roundBufferedReasoning: string[] = [];
     let roundSucceeded = false;
     let emptyRoundRetries = 0;
     const maxEmptyRoundRetries = loopCount === 1 ? 2 : 0;
+    let repetitionLoopAborted = false;
+
+    const detectTrailingRepetitionLoop = (text: string): { repeated: boolean; cleanedText: string } => {
+      if (text.length < 480) return { repeated: false, cleanedText: text };
+      const tail = text.slice(-1800);
+      // Match any block of 90..500 chars that repeats 3+ times consecutively at the tail
+      const repMatch = tail.match(/([\s\S]{90,500}?)\1{2,}[\s\S]{0,60}$/);
+      if (repMatch && repMatch[1]) {
+        const unit = repMatch[1];
+        const firstIdx = text.indexOf(unit);
+        const cleaned = firstIdx !== -1 ? text.slice(0, firstIdx + unit.length).trim() : text.slice(0, text.length - repMatch[0].length + unit.length).trim();
+        return { repeated: true, cleanedText: cleaned };
+      }
+      return { repeated: false, cleanedText: text };
+    };
+
+    const emitRoundWorkingProgress = () => {
+      const reasoningText = roundBufferedReasoning.join('');
+      const preToolText = !isFinalResponseStreaming ? roundBufferedDeltas.join('') : '';
+      const combined =
+        reasoningText && preToolText
+          ? `${reasoningText}\n${preToolText}`
+          : reasoningText || preToolText;
+      const cleaned = stripInternalReasoningTokens(combined).trim();
+      if (!cleaned) return null;
+      const targetStep =
+        [...activityEvents].reverse().find((a) => a.status === 'running') ||
+        activityEvents[activityEvents.length - 1];
+      if (!targetStep) return null;
+      const liveUpd = updateLiveStepProgress(targetStep.id, cleaned);
+      if (!liveUpd) return null;
+      return createSSEEvent({
+        type: 'working_progress_update',
+        stepId: targetStep.id,
+        update: liveUpd,
+      });
+    };
 
     while (!roundSucceeded) {
-      const stream = adapter.generateStream(messages, normalizedTools, {
+      const roundMessages = buildCompactedMessagesForRound(loopCount);
+      const roundAbortController = new AbortController();
+      const onParentAbort = () => roundAbortController.abort();
+      if (signal) {
+        if (signal.aborted) roundAbortController.abort();
+        else signal.addEventListener('abort', onParentAbort, { once: true });
+      }
+      repetitionLoopAborted = false;
+
+      const stream = adapter.generateStream(roundMessages, normalizedTools, {
         model: modelId,
         apiKey,
         baseUrl,
         accountId,
-        signal,
+        signal: roundAbortController.signal,
         preferredPairIndex: activeCfPairIndex,
         onCredentialActive: (info: any) => {
           if (info.providerId === 'cloudflare' && typeof info.index === 'number' && info.index >= 0) {
@@ -1728,21 +2007,86 @@ Report this exact API error to the user so they can verify their API key or prov
 
       let errorInStream: string | null = null;
 
-      for await (const chunk of stream) {
-        if (signal?.aborted) {
-          initialAct.status = 'completed';
-          initialAct.safeSummary = 'Cancelled';
-          yield createSSEEvent({ type: 'activity', event: initialAct });
-          yield createSSEEvent({ type: 'status', status: 'cancelled' });
-          yield createSSEEvent({ type: 'done', messageId: `msg-${Date.now()}` });
-          return;
-        }
+      try {
+        for await (const chunk of stream) {
+          if (signal?.aborted) {
+            initialAct.status = 'completed';
+            initialAct.safeSummary = 'Cancelled';
+            yield createSSEEvent({ type: 'activity', event: initialAct });
+            yield createSSEEvent({ type: 'status', status: 'cancelled' });
+            yield createSSEEvent({ type: 'done', messageId: `msg-${Date.now()}` });
+            return;
+          }
 
-        if (chunk.type === 'delta' && chunk.delta) {
+          if (chunk.finishReason) {
+            roundFinishReason = chunk.finishReason;
+          }
+
+          if (chunk.type === 'reasoning' && chunk.delta) {
+            if (executionStage === 'model_request_started' || executionStage === 'followup_request_started') {
+              executionStage = 'model_response_received';
+            }
+            roundReasoningContent += chunk.delta;
+            roundBufferedReasoning.push(chunk.delta);
+            const repCheck = detectTrailingRepetitionLoop(roundReasoningContent);
+            if (repCheck.repeated) {
+              console.warn(`[DOCIUM AI Diagnostic] Repetition loop detected in reasoning stream (round ${loopCount}, chars=${roundReasoningContent.length}). Aborting stuck stream immediately.`);
+              roundReasoningContent = repCheck.cleanedText;
+              roundBufferedReasoning = [repCheck.cleanedText];
+              repetitionLoopAborted = true;
+              const evt = emitRoundWorkingProgress();
+              if (evt) yield evt;
+              roundAbortController.abort();
+              break;
+            }
+            const evt = emitRoundWorkingProgress();
+            if (evt) yield evt;
+          } else if (chunk.type === 'delta' && chunk.delta) {
           if (executionStage === 'model_request_started' || executionStage === 'followup_request_started') {
             executionStage = 'model_response_received';
           }
-          const cleanDelta = stripInternalReasoningTokens(chunk.delta);
+
+          // Separate any <think>...</think> tags emitted inside regular delta stream
+          let remaining = chunk.delta;
+          let visibleChunk = '';
+          let reasoningChunk = '';
+
+          while (remaining.length > 0) {
+            if (insideThinkTag) {
+              const closeIdx = remaining.search(/<\/(?:think|thought)>/i);
+              if (closeIdx === -1) {
+                reasoningChunk += remaining;
+                remaining = '';
+              } else {
+                const closeMatch = remaining.slice(closeIdx).match(/^<\/(?:think|thought)>/i);
+                const closeLen = closeMatch ? closeMatch[0].length : 8;
+                reasoningChunk += remaining.slice(0, closeIdx);
+                remaining = remaining.slice(closeIdx + closeLen);
+                insideThinkTag = false;
+              }
+            } else {
+              const openIdx = remaining.search(/<(?:think|thought)>/i);
+              if (openIdx === -1) {
+                visibleChunk += remaining;
+                remaining = '';
+              } else {
+                const openMatch = remaining.slice(openIdx).match(/^<(?:think|thought)>/i);
+                const openLen = openMatch ? openMatch[0].length : 7;
+                visibleChunk += remaining.slice(0, openIdx);
+                remaining = remaining.slice(openIdx + openLen);
+                insideThinkTag = true;
+              }
+            }
+          }
+
+          if (reasoningChunk) {
+            roundReasoningContent += reasoningChunk;
+            roundBufferedReasoning.push(reasoningChunk);
+            const evt = emitRoundWorkingProgress();
+            if (evt) yield evt;
+          }
+
+          const cleanDelta = stripInternalReasoningTokens(visibleChunk);
           if (cleanDelta) {
             assistantContent += cleanDelta;
             roundBufferedDeltas.push(cleanDelta);
@@ -1751,23 +2095,8 @@ Report this exact API error to the user so they can verify their API key or prov
             if (isFinalResponseStreaming) {
               yield createSSEEvent({ type: 'delta', text: cleanDelta });
             } else {
-              // Live incremental progress stream inside the expanded active Working step
-              const accumulatedProgress = stripInternalReasoningTokens(roundBufferedDeltas.join(''));
-              if (accumulatedProgress.trim()) {
-                const targetStep =
-                  [...activityEvents].reverse().find((a) => a.status === 'running') ||
-                  activityEvents[activityEvents.length - 1];
-                if (targetStep) {
-                  const liveUpd = updateLiveStepProgress(targetStep.id, accumulatedProgress);
-                  if (liveUpd) {
-                    yield createSSEEvent({
-                      type: 'working_progress_update',
-                      stepId: targetStep.id,
-                      update: liveUpd,
-                    });
-                  }
-                }
-              }
+              const evt = emitRoundWorkingProgress();
+              if (evt) yield evt;
             }
           }
         } else if (chunk.type === 'tool_call' && chunk.toolCall) {
@@ -1776,8 +2105,15 @@ Report this exact API error to the user so they can verify their API key or prov
           }
           pendingCalls.push(chunk.toolCall);
         } else if (chunk.type === 'error' && chunk.error) {
-          errorInStream = chunk.error;
+          if (!repetitionLoopAborted) {
+            errorInStream = chunk.error;
+          }
           break;
+        }
+      }
+      } finally {
+        if (signal) {
+          signal.removeEventListener('abort', onParentAbort);
         }
       }
 
@@ -1790,11 +2126,11 @@ Report this exact API error to the user so they can verify their API key or prov
         return;
       }
 
-      // Check if Round 1 returned completely empty (no deltas, no tool calls)
-      // Retry bounded with exponential backoff before declaring empty
+      // Check if Round 1 returned completely empty (no deltas, no reasoning, no tool calls)
       if (
         !errorInStream &&
         !assistantContent.trim() &&
+        !roundReasoningContent.trim() &&
         pendingCalls.length === 0 &&
         emptyRoundRetries < maxEmptyRoundRetries &&
         !signal?.aborted
@@ -1816,24 +2152,49 @@ Report this exact API error to the user so they can verify their API key or prov
       // Check document action request enforcement first
       const isDocAction = workspaceType === 'doc' && isDocumentActionRequest(userPrompt);
 
-      if (isDocAction && !editorActionExecuted) {
-        // Document modification requested, but no editor action was executed yet!
+      const needsContentPlacementStill = requiresContentPlacement && !contentPlacementExecuted;
+      if (isDocAction && (!editorActionExecuted || needsContentPlacementStill || repetitionLoopAborted)) {
+        // Document modification requested, but content placement was not executed yet!
+        const isFormatOrReplaceOnly =
+          /\b(spacing|line\s*height|line\s*spacing|font|bold|italic|underline|strikethrough|align|center|justify|color|highlight|replace|delete|remove|clear)\b/i.test(userPrompt) &&
+          !/\b(prepare|write|create|draft|generate|insert|add|extract|put|build|compile|compose|produce)\b/i.test(userPrompt);
+
         const hasCodeBlock = /```[\s\S]*?```/.test(assistantContent);
         const hasStructuredContent = assistantContent.length > 180 && (assistantContent.includes('#') || assistantContent.includes('\n\n'));
-        const isSubstantive = (hasCodeBlock || hasStructuredContent) && !isMetaNarration(assistantContent);
+        const isSubstantive = !isFormatOrReplaceOnly && (hasCodeBlock || hasStructuredContent) && !isMetaNarration(assistantContent);
 
-        if (!isSubstantive) {
-          // Model emitted narrative remarks or promises without calling a tool or providing substantive content
-          console.log(`[DOCIUM Agent] Document action enforcement: model provided narrative remarks without tool call or substantive content. Prompting continuation (round ${loopCount}/${dynamicBudget})...`);
-          messages.push({ role: 'assistant', content: assistantContent });
+        // Never scrape private reasoning_content into the document! Instead, enforce a /no_think tool-execution round.
+        if (!isSubstantive && loopCount < Math.min(5, dynamicBudget - 1)) {
+          console.log(
+            `[DOCIUM Agent] Document action enforcement: round ${loopCount} ended with 0 tool calls (finishReason=${roundFinishReason || 'stop'}, hasAssistantText=${Boolean(assistantContent.trim())}, repetitionAborted=${repetitionLoopAborted}). Prompting immediate tool execution with /no_think...`
+          );
+          if (assistantContent.trim()) {
+            messages.push({ role: 'assistant', content: assistantContent });
+          } else {
+            messages.push({
+              role: 'assistant',
+              content: 'Ready to execute document tools.',
+            });
+          }
           messages.push({
             role: 'user',
-            content: `[SYSTEM ACTION ENFORCEMENT] You stated your intention to update the document, but you did NOT invoke any document editing tool. You must invoke "insert_structured_document" or "append_or_insert_paragraph" right now with the complete structured content so the editor updates. Do not reply with narrative text without calling a tool. Request: "${userPrompt}"`,
+            content: isFormatOrReplaceOnly
+              ? `/no_think\n[SYSTEM ACTION ENFORCEMENT] Immediately invoke the required document formatting/editing tool right now (e.g., "set_line_spacing", "set_font_family", "set_font_size", "set_text_alignment", "apply_text_formatting", "replace_text", or "delete_content") so the change is applied to the document page. Request: "${userPrompt}" /no_think`
+              : `/no_think\n[SYSTEM ACTION ENFORCEMENT] Do NOT output prose or thinking. Immediately invoke "insert_text" right now with the complete, well-structured Markdown document (including # headings, paragraphs, markdown tables, and bullet lists), plus any "insert_chart" and styling tools ("format_all_headings", "set_font_family", "set_line_spacing") to fulfill: "${userPrompt}" /no_think`,
           });
           continue;
         }
 
-        // Automatic structured document action execution with substantive content:
+        if (!isSubstantive) {
+          messages.push({ role: 'assistant', content: assistantContent || 'Ready to execute document insertion.' });
+          messages.push({
+            role: 'user',
+            content: `/no_think\n[SYSTEM ACTION ENFORCEMENT] You must invoke "insert_text" or "insert_paragraph" right now to update the active document. Request: "${userPrompt}" /no_think`,
+          });
+          continue;
+        }
+
+        // Automatic structured document action execution with substantive assistantContent:
         let contentToInsert = assistantContent.trim();
         const preambleMatch = contentToInsert.match(/^(?:Sure!|Certainly!|Here (?:is|are)|I have (?:added|created)|Of course)[^\n]*\n+/i);
         if (preambleMatch && contentToInsert.length > preambleMatch[0].length + 20) {
@@ -1887,6 +2248,10 @@ Report this exact API error to the user so they can verify their API key or prov
           error: editResult.error,
           isEditorAction: true,
         });
+
+        if (editResult.success) {
+          contentPlacementExecuted = true;
+        }
 
         while (pendingEditorActions.length > 0) {
           const ea = pendingEditorActions.shift()!;
@@ -1948,7 +2313,7 @@ Report this exact API error to the user so they can verify their API key or prov
         }
 
         const docName = activeDocContext?.title || 'active document';
-        const fullReply = `I have placed the requested programs into **${docName}** with syntax-highlighted code blocks, structured headings, and formatted layout.`;
+        const fullReply = `I have placed the requested content into **${docName}** with structured headings and formatting.`;
         assistantContent = fullReply;
         yield createSSEEvent({ type: 'delta', text: fullReply });
         break;
@@ -1961,7 +2326,7 @@ Report this exact API error to the user so they can verify their API key or prov
         const isDocPlacementPrompt = /place|insert|put|add.*into.*doc|write.*into.*doc/i.test(userPrompt);
         if (editorActionExecuted && isDocPlacementPrompt && assistantContent.includes('```')) {
           const docName = activeDocContext?.title || 'active document';
-          const cleanConfirmation = `I have placed the requested content into **${docName}** with syntax-highlighted code blocks, structured headings, and formatted layout.`;
+          const cleanConfirmation = `I have placed the requested content into **${docName}** with structured headings and formatting.`;
           assistantContent = cleanConfirmation;
           roundBufferedDeltas = [cleanConfirmation];
         }
@@ -2000,7 +2365,7 @@ Report this exact API error to the user so they can verify their API key or prov
           }
           yield createSSEEvent({ type: 'delta', text: summary });
           assistantContent = summary;
-        } else if (executedToolsRecord.length > 0 || editorActionExecuted || fileOpExecuted) {
+        } else if ((!requiresContentPlacement || contentPlacementExecuted) && (executedToolsRecord.length > 0 || editorActionExecuted || fileOpExecuted)) {
           // Graceful recovery from empty follow-up response when tools previously succeeded!
           const synthesized = synthesizeToolCompletionConfirmation(executedToolsRecord, {
             activeDocTitle: activeDocContext?.title,
@@ -2021,6 +2386,18 @@ Report this exact API error to the user so they can verify their API key or prov
           }
           yield createSSEEvent({ type: 'delta', text: synthesized });
           assistantContent = synthesized;
+        } else if (roundReasoningContent.trim().length > 0 && loopCount < Math.min(3, dynamicBudget - 1)) {
+          // Model spent round in reasoning without emitting visible final answer yet
+          console.log(`[DOCIUM Agent] Non-tool turn finished in reasoning without final answer (round ${loopCount}). Prompting direct final answer...`);
+          messages.push({
+            role: 'assistant',
+            content: `Completed analysis.`,
+          });
+          messages.push({
+            role: 'user',
+            content: `[SYSTEM] Please provide your final response directly to the user now without repeating internal reasoning.`,
+          });
+          continue;
         } else {
           // Genuine empty response where NO tools succeeded and retries exhausted
           console.warn(`[DOCIUM AI Diagnostic] Provider returned empty response (model: ${modelId}, loop: ${loopCount})`);
@@ -2044,22 +2421,8 @@ Report this exact API error to the user so they can verify their API key or prov
     executionStage = 'tool_calls_parsed';
     console.log(`[DOCIUM AI Diagnostic] Agent stage: ${executionStage} | toolCallsCount: ${pendingCalls.length}`);
 
-    // If pre-tool remarks were buffered, preserve as intermediate explanation (Category B)
-    const intermediateExplanation = roundBufferedDeltas.join('').trim();
+    // Clear buffered pre-tool remarks (already shown via live progress; avoid duplicating in Working UI)
     roundBufferedDeltas = [];
-
-    if (intermediateExplanation && !isMetaNarration(intermediateExplanation)) {
-      // Append intermediate explanation to the current active step inside Working
-      const targetStep =
-        [...activityEvents].reverse().find((a) => a.status === 'running') ||
-        activityEvents[activityEvents.length - 1];
-      if (targetStep) {
-        const upd = addStepUpdate(targetStep.id, intermediateExplanation);
-        if (upd) {
-          yield createSSEEvent({ type: 'working_progress_update', stepId: targetStep.id, update: upd });
-        }
-      }
-    }
 
     // Append assistant's thoughts/tool call to history
     messages.push({
@@ -2127,11 +2490,54 @@ Report this exact API error to the user so they can verify their API key or prov
       }
 
       toolExecutionContext.toolCallId = tc.id;
-      const result = await executeTool(tc.name, tc.arguments, toolExecutionContext);
+
+      // Read Deduplication: If the model attempts to re-read the exact same unchanged document scope,
+      // return a compact cached notice instead of dumping thousands of duplicate tokens into context!
+      const isReadTool = tc.name === 'read_document_content' || tc.name === 'find_document_content';
+      const readCacheKey = isReadTool ? `${tc.name}:${JSON.stringify(tc.arguments || {})}` : '';
+      const cachedRead = isReadTool ? readResultCache.get(readCacheKey) : undefined;
+
+      let result;
+      if (cachedRead && cachedRead.revision === docRevision) {
+        result = {
+          success: true,
+          data: {
+            cached: true,
+            alreadyReadInRound: cachedRead.round,
+            docUnchanged: true,
+            note: 'You already read this exact content earlier in this response and the document has not changed. Proceed directly to making edits.',
+          },
+          activitySummary: `Reused earlier ${tc.name} result (document unchanged)`,
+        };
+      } else {
+        result = await executeTool(tc.name, tc.arguments, toolExecutionContext);
+        if (isReadTool && result.success) {
+          readResultCache.set(readCacheKey, {
+            revision: docRevision,
+            round: loopCount,
+            summary: result.activitySummary || tc.name,
+          });
+        }
+      }
       console.log(`[DOCIUM Agent] Tool execution completed: "${tc.name}", success=${result.success}${result.errorCategory ? ` [${result.errorCategory}]` : ''}`);
 
       if (result.success) {
         roundHasProductiveWork = true;
+        if (result.editorAction || result.fileOperation) {
+          docRevision++;
+        }
+        if (CONTENT_PLACEMENT_TOOLS.has(tc.name)) {
+          contentPlacementExecuted = true;
+        }
+        const targetHint =
+          (tc.arguments?.headingTitle as string) ||
+          (tc.arguments?.heading as string) ||
+          (tc.arguments?.query as string) ||
+          (tc.arguments?.scope as string) ||
+          '';
+        ledgerCompletedSteps.push(
+          `R${loopCount}: ${tc.name}${targetHint ? ` (${String(targetHint).slice(0, 40)})` : ''} -> ${result.activitySummary || 'ok'}`
+        );
       }
 
       // Mandatory Security Stop Behavior: Exceeded active workspace boundary
@@ -2230,13 +2636,14 @@ Report this exact API error to the user so they can verify their API key or prov
         yield createSSEEvent({ type: 'file_op', ...result.fileOperation });
       }
 
-      // If editor actions were performed, emit to client idempotently
+      // If editor actions were performed, emit to client idempotently and keep server shadow doc in sync
       while (pendingEditorActions.length > 0) {
         const ea = pendingEditorActions.shift()!;
         const key = ea.actionId || `${ea.action}-${JSON.stringify(ea.payload)}`;
         if (!dispatchedActionIds.has(key)) {
           dispatchedActionIds.add(key);
           editorActionExecuted = true;
+          applyEditorActionToShadowDoc(activeDocContext, ea.action, ea.payload);
           console.log(`[DOCIUM Agent] Editor action dispatched: "${ea.action}", id="${ea.actionId || key}"`);
           yield createSSEEvent({ type: 'editor_action', ...ea });
         }
@@ -2246,6 +2653,7 @@ Report this exact API error to the user so they can verify their API key or prov
         if (!dispatchedActionIds.has(key)) {
           dispatchedActionIds.add(key);
           editorActionExecuted = true;
+          applyEditorActionToShadowDoc(activeDocContext, result.editorAction.action, result.editorAction.payload);
           console.log(`[DOCIUM Agent] Editor action dispatched: "${result.editorAction.action}", id="${result.editorAction.actionId || key}"`);
           yield createSSEEvent({ type: 'editor_action', ...result.editorAction });
         }
@@ -2258,6 +2666,20 @@ Report this exact API error to the user so they can verify their API key or prov
         toolCallId: tc.id,
         content: result.success ? JSON.stringify(result.data || 'OK') : `Error: ${result.error}`,
       });
+    }
+
+    // Auto-persist the per-response task ledger to the scratchpad after each productive round.
+    // This lets the model check scratchpad on subsequent rounds and know exactly what it already did,
+    // without relying on tool result compaction alone (which only truncates old messages, not the scratchpad).
+    if (roundHasProductiveWork && ledgerCompletedSteps.length > 0 && params.onUpdateScratchpad) {
+      const ledgerNote = `[TASK PROGRESS LEDGER — after round ${loopCount}]\n${ledgerCompletedSteps
+        .slice(-15)
+        .map((s) => `- ${s}`)
+        .join('\n')}\n`;
+      const updatedScratchpad = ledgerNote + (currentScratchpad ? `\n---\nPrevious notes:\n${currentScratchpad}` : '');
+      currentScratchpad = updatedScratchpad;
+      try { await params.onUpdateScratchpad(updatedScratchpad); } catch { /* scratchpad persistence is best-effort */ }
+      yield createSSEEvent({ type: 'scratchpad', notes: currentScratchpad });
     }
 
     // Dynamic budget adaptation and no-progress guard
@@ -2280,7 +2702,8 @@ Report this exact API error to the user so they can verify their API key or prov
 
   // Completion Gate Check at loop exit:
   const isDocActionAtExit = workspaceType === 'doc' && isDocumentActionRequest(userPrompt);
-  if ((isDocActionAtExit && !editorActionExecuted) || (consecutiveNoProgressRounds >= 3 && !editorActionExecuted && !fileOpExecuted)) {
+  const missingRequiredPlacement = requiresContentPlacement && !contentPlacementExecuted;
+  if ((isDocActionAtExit && (!editorActionExecuted || missingRequiredPlacement)) || (consecutiveNoProgressRounds >= 3 && !editorActionExecuted && !fileOpExecuted)) {
     console.warn(`[DOCIUM Agent] Loop terminated without executing document modification for doc action request.`);
     const incompleteMsg = 'The task reached its maximum execution budget before the document modifications could be completed. The extracted content has been preserved in your workspace notes. Please request the document insertion directly.';
     yield createSSEEvent({ type: 'final_response_started' });

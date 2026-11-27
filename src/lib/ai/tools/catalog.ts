@@ -207,7 +207,7 @@ export const searchToolCatalogTool: ToolCatalogEntry = {
       finalTools = TOOL_CATALOG.filter((t) => t.availability === 'implemented' && coreIds.includes(t.id));
     }
 
-    const results = finalTools.map((t) => ({
+    const results = finalTools.slice(0, 12).map((t) => ({
       id: t.id,
       name: t.name,
       description: t.description,
@@ -1269,9 +1269,13 @@ export const readDocumentContentTool: ToolCatalogEntry = {
         type: 'number',
         description: 'Page number to read.',
       },
+      offset: {
+        type: 'number',
+        description: 'Optional character offset to start reading from (for very long documents).',
+      },
       maxCharacters: {
         type: 'number',
-        description: 'Max characters to read (defaults to 3000).',
+        description: 'Max characters to read (defaults to 12000, max 24000).',
       },
     },
   },
@@ -1280,7 +1284,8 @@ export const readDocumentContentTool: ToolCatalogEntry = {
     if (!doc) return { success: false, error: 'No active document loaded.' };
 
     const scope = (args.scope as string) || 'full';
-    const maxChars = Math.min(Number(args.maxCharacters || 3000), 8000);
+    const maxChars = Math.min(Math.max(500, Number(args.maxCharacters || 12000)), 24000);
+    const offset = Math.max(0, Number(args.offset || 0));
 
     if (scope === 'selection') {
       const selText = doc.selectedText || doc.selection?.selectedText || '';
@@ -1291,34 +1296,108 @@ export const readDocumentContentTool: ToolCatalogEntry = {
       };
     }
 
-    // Attempt to get live text from registered editor
+    // Attempt to get live text from registered editor, or fallback to doc.content HTML on the server
     const liveEditor = editorRegistry.getEditor(doc.id);
-    const fullText = liveEditor ? liveEditor.getText() : '';
+    const stripHtmlToText = (html: string): string =>
+      html
+        .replace(/<\/(p|h[1-6]|li|tr|div|pre|blockquote)>/gi, '\n')
+        .replace(/<br\s*\/?>/gi, '\n')
+        .replace(/<[^>]+>/g, '')
+        .replace(/&nbsp;/gi, ' ')
+        .replace(/&amp;/gi, '&')
+        .replace(/&lt;/gi, '<')
+        .replace(/&gt;/gi, '>')
+        .replace(/&quot;/gi, '"')
+        .replace(/&#39;/gi, "'")
+        .replace(/\n{3,}/g, '\n\n')
+        .trim();
 
-    if (scope === 'heading' && args.heading && liveEditor) {
-      const headingText = String(args.heading);
-      const sec = findSectionByHeading(liveEditor.state.doc, headingText);
-      if (sec.found && sec.from !== undefined && sec.to !== undefined) {
-        const text = liveEditor.state.doc.textBetween(sec.from, sec.to, '\n\n');
-        return {
-          success: true,
-          data: { scope: 'heading', heading: headingText, text: text.slice(0, maxChars) },
-          activitySummary: `Read section "${headingText}"`,
-        };
+    const fullText = liveEditor ? liveEditor.getText() : stripHtmlToText(doc.content || '');
+
+    if (scope === 'heading' && args.heading) {
+      const headingQuery = String(args.heading).trim().toLowerCase();
+      if (liveEditor) {
+        const sec = findSectionByHeading(liveEditor.state.doc, String(args.heading));
+        if (sec.found && sec.from !== undefined && sec.to !== undefined) {
+          const text = liveEditor.state.doc.textBetween(sec.from, sec.to, '\n\n');
+          return {
+            success: true,
+            data: { scope: 'heading', heading: String(args.heading), text: text.slice(0, maxChars) },
+            activitySummary: `Read section "${args.heading}"`,
+          };
+        }
+      } else if (doc.content) {
+        // Parse all heading tags reliably even when headings contain nested <span> or formatting tags
+        const headingRegex = /<h([1-6])[^>]*>([\s\S]*?)<\/h\1>/gi;
+        const headings: Array<{ level: number; text: string; startIdx: number; endIdx: number }> = [];
+        let hm: RegExpExecArray | null;
+        while ((hm = headingRegex.exec(doc.content)) !== null) {
+          headings.push({
+            level: Number(hm[1]),
+            text: stripHtmlToText(hm[2]).toLowerCase(),
+            startIdx: hm.index,
+            endIdx: hm.index + hm[0].length,
+          });
+        }
+        const matchIdx = headings.findIndex(
+          (h) => h.text === headingQuery || h.text.includes(headingQuery) || headingQuery.includes(h.text)
+        );
+        if (matchIdx !== -1) {
+          const start = headings[matchIdx].startIdx;
+          const level = headings[matchIdx].level;
+          let end = doc.content.length;
+          for (let j = matchIdx + 1; j < headings.length; j++) {
+            if (headings[j].level <= level) {
+              end = headings[j].startIdx;
+              break;
+            }
+          }
+          const sectionText = stripHtmlToText(doc.content.slice(start, end));
+          return {
+            success: true,
+            data: {
+              scope: 'heading',
+              heading: String(args.heading),
+              text: sectionText.slice(0, maxChars),
+              totalLength: sectionText.length,
+              isTruncated: sectionText.length > maxChars,
+            },
+            activitySummary: `Read section "${args.heading}"`,
+          };
+        }
       }
     }
 
-    const preview = fullText.slice(0, maxChars);
+    if (scope === 'tail') {
+      const startPos = Math.max(0, fullText.length - maxChars);
+      const tailText = fullText.slice(startPos);
+      return {
+        success: true,
+        data: {
+          documentId: doc.id,
+          title: doc.title,
+          scope: 'tail',
+          offset: startPos,
+          text: tailText,
+          totalLength: fullText.length,
+          isTruncated: startPos > 0,
+        },
+        activitySummary: `Read end of active document (${tailText.length} chars)`,
+      };
+    }
+
+    const preview = fullText.slice(offset, offset + maxChars);
     return {
       success: true,
       data: {
         documentId: doc.id,
         title: doc.title,
+        offset,
         text: preview,
         totalLength: fullText.length,
-        isTruncated: preview.length < fullText.length,
+        isTruncated: offset + preview.length < fullText.length,
       },
-      activitySummary: `Read active document content`,
+      activitySummary: `Read active document content (${preview.length}/${fullText.length} chars)`,
     };
   },
 };
@@ -1332,6 +1411,8 @@ export const findDocumentContentTool: ToolCatalogEntry = {
   workspace: ['doc'],
   risk: 'read_only',
   availability: 'implemented',
+  aliases: ['find text', 'search document', 'locate text in document', 'find specific text'],
+  keywords: ['find', 'search', 'locate', 'text', 'phrase', 'match', 'document'],
   parameters: {
     type: 'object',
     properties: {
@@ -1357,32 +1438,75 @@ export const findDocumentContentTool: ToolCatalogEntry = {
     const doc = context.activeDocument;
     if (!doc) return { success: false, error: 'No active document loaded.' };
 
+    const caseSensitive = Boolean(args.caseSensitive);
+    const matchWholeWord = Boolean(args.matchWholeWord);
+
     const liveEditor = editorRegistry.getEditor(doc.id);
-    if (!liveEditor) {
-      return { success: false, error: 'No active document editor is currently mounted.' };
+    if (liveEditor) {
+      const searchRes = searchProseMirrorDoc(liveEditor.state.doc, {
+        query,
+        caseSensitive,
+        matchWholeWord,
+      });
+
+      const matches = searchRes.matches.map((m, idx) => ({
+        matchIndex: idx,
+        from: m.from,
+        to: m.to,
+        snippet: m.snippet,
+      }));
+
+      return {
+        success: true,
+        data: {
+          query,
+          totalMatches: searchRes.totalMatches,
+          matches,
+        },
+        activitySummary: `Found ${searchRes.totalMatches} matches for "${query}"`,
+      };
     }
 
-    const searchRes = searchProseMirrorDoc(liveEditor.state.doc, {
-      query,
-      caseSensitive: Boolean(args.caseSensitive),
-      matchWholeWord: Boolean(args.matchWholeWord),
-    });
+    // Server-side fallback: search stripped plain text from doc.content
+    const rawHtml = doc.content || '';
+    const plainText = rawHtml
+      .replace(/<\/(p|h[1-6]|li|tr|div|pre|blockquote)>/gi, '\n')
+      .replace(/<br\s*\/?>/gi, '\n')
+      .replace(/<[^>]+>/g, '')
+      .replace(/&nbsp;/gi, ' ')
+      .replace(/&amp;/gi, '&')
+      .replace(/&lt;/gi, '<')
+      .replace(/&gt;/gi, '>')
+      .replace(/&quot;/gi, '"')
+      .replace(/&#39;/gi, "'");
 
-    const matches = searchRes.matches.map((m, idx) => ({
-      matchIndex: idx,
-      from: m.from,
-      to: m.to,
-      snippet: m.snippet,
-    }));
+    const escaped = query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const pattern = matchWholeWord ? `\\b${escaped}\\b` : escaped;
+    const regex = new RegExp(pattern, caseSensitive ? 'g' : 'gi');
+    const matches: Array<{ matchIndex: number; from: number; to: number; snippet: string }> = [];
+    let m: RegExpExecArray | null;
+    while ((m = regex.exec(plainText)) !== null) {
+      const from = m.index;
+      const to = from + m[0].length;
+      const ctxStart = Math.max(0, from - 40);
+      const ctxEnd = Math.min(plainText.length, to + 40);
+      matches.push({
+        matchIndex: matches.length,
+        from,
+        to,
+        snippet: plainText.slice(ctxStart, ctxEnd).replace(/\s+/g, ' ').trim(),
+      });
+      if (m.index === regex.lastIndex) regex.lastIndex++;
+    }
 
     return {
       success: true,
       data: {
         query,
-        totalMatches: searchRes.totalMatches,
+        totalMatches: matches.length,
         matches,
       },
-      activitySummary: `Found ${searchRes.totalMatches} matches for "${query}"`,
+      activitySummary: `Found ${matches.length} matches for "${query}"`,
     };
   },
 };
@@ -1595,31 +1719,43 @@ export const deleteContentTool: ToolCatalogEntry = {
     const actionId = `act-del-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
 
     if (target === 'heading' && args.headingTitle) {
-      // Find and delete the heading section
-      const liveEditor = editorRegistry.getEditor(doc.id);
-      if (liveEditor) {
-        const sec = findSectionByHeading(liveEditor.state.doc, String(args.headingTitle));
-        if (sec.found && sec.from !== undefined && sec.to !== undefined) {
-          liveEditor.chain().focus().deleteRange({ from: sec.from, to: sec.to }).run();
-          return {
-            success: true,
-            activitySummary: `Deleted section "${args.headingTitle}"`,
-          };
-        }
+      const headingTitle = String(args.headingTitle);
+      const payload = { headingTitle, documentId: doc.id };
+      const summary = `Deleted section "${headingTitle}"`;
+      if (context.onEditorAction) {
+        await context.onEditorAction({
+          actionId,
+          action: 'delete_section',
+          payload,
+          summary,
+        });
       }
-      return { success: false, error: `Heading "${args.headingTitle}" not found.` };
-    }
-
-    if (target === 'text' && args.targetText) {
-      const result = await editorRegistry.executeAction(
-        'find_and_replace_text',
-        { findText: args.targetText, replaceText: '', documentId: doc.id },
-        doc.id
-      );
+      const result = await editorRegistry.executeAction('delete_section', payload, doc.id);
       return {
         success: result.success,
         error: result.error,
-        activitySummary: `Deleted text "${args.targetText}"`,
+        activitySummary: summary,
+        editorAction: { actionId, action: 'delete_section', payload, summary },
+      };
+    }
+
+    if (target === 'text' && args.targetText) {
+      const payload = { findText: String(args.targetText), replaceText: '', documentId: doc.id };
+      const summary = `Deleted text "${args.targetText}"`;
+      if (context.onEditorAction) {
+        await context.onEditorAction({
+          actionId,
+          action: 'find_and_replace_text',
+          payload,
+          summary,
+        });
+      }
+      const result = await editorRegistry.executeAction('find_and_replace_text', payload, doc.id);
+      return {
+        success: result.success,
+        error: result.error,
+        activitySummary: summary,
+        editorAction: { actionId, action: 'find_and_replace_text', payload, summary },
       };
     }
 
@@ -1726,7 +1862,7 @@ export const applyTextFormattingTool: ToolCatalogEntry = {
   id: 'apply_text_formatting',
   name: 'apply_text_formatting',
   label: 'Apply Text Formatting',
-  description: 'Apply supported formatting (bold, italic, underline, strike, color, highlight, font size, font family, alignment) to selected text or target text.',
+  description: 'Apply supported formatting (bold, italic, underline, strike, color, highlight, fontSize, fontFamily, alignment, lineHeight, clear) to selected text, target text, or the entire document.',
   category: 'formatting',
   workspace: ['doc'],
   risk: 'modifying',
@@ -1736,16 +1872,16 @@ export const applyTextFormattingTool: ToolCatalogEntry = {
     properties: {
       formatting: {
         type: 'string',
-        enum: ['bold', 'italic', 'underline', 'strike', 'color', 'highlight', 'fontSize', 'fontFamily', 'alignment', 'clear'],
+        enum: ['bold', 'italic', 'underline', 'strike', 'color', 'highlight', 'fontSize', 'fontFamily', 'alignment', 'lineHeight', 'lineSpacing', 'clear'],
         description: 'Formatting operation to apply.',
       },
       value: {
         type: 'string',
-        description: 'Value for color (hex/name), fontSize (e.g. "18pt"), fontFamily, or alignment ("left", "center", "right", "justify").',
+        description: 'Value for color (hex/name), fontSize (e.g. "18pt"), fontFamily, alignment ("left", "center", "right", "justify"), or lineHeight ("1.0", "1.15", "1.5", "2.0").',
       },
       targetText: {
         type: 'string',
-        description: 'Optional specific text to format. If omitted, applies to current selection.',
+        description: 'Optional specific text to format. If omitted, applies to current selection or whole document.',
       },
     },
     required: ['formatting'],
@@ -1770,6 +1906,10 @@ export const applyTextFormattingTool: ToolCatalogEntry = {
       action = 'set_font_style';
       if (fmt === 'fontsize') payload.fontSize = val;
       if (fmt === 'fontfamily') payload.fontFamily = val;
+    } else if (fmt === 'lineheight' || fmt === 'linespacing' || fmt === 'spacing') {
+      action = 'set_line_height';
+      const rawLh = (val || '1.0').trim();
+      payload.lineHeight = rawLh === '1' ? '1.0' : rawLh === '2' ? '2.0' : rawLh;
     } else {
       payload.formatting = fmt;
       payload.value = val;
