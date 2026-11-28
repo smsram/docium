@@ -265,27 +265,34 @@ export default function AiCreationHomepage() {
       '<p></p>'
     );
 
-    // Upload any attached raw files to workspace source storage in the background
-    for (const att of draftAttachments) {
-      const rawFile = rawFilesMapRef.current.get(att.id);
-      if (rawFile) {
-        const formData = new FormData();
-        formData.append('file', rawFile);
-        formData.append('workspaceId', newId);
-        fetch('/api/ai/sources/upload', {
-          method: 'POST',
-          body: formData,
-        })
-          .then((res) => (res.ok ? res.json() : null))
-          .then((data) => {
-            if (data?.source) {
-              addDocumentSource(newId, data.source);
+    // Upload any attached raw files to workspace source storage BEFORE opening the workspace
+    // so the workspace Sources vault & RAG index are complete on load and never duplicated.
+    if (draftAttachments.length > 0) {
+      setProcessingStep('Indexing attached files...');
+      await Promise.allSettled(
+        draftAttachments.map(async (att) => {
+          const rawFile = rawFilesMapRef.current.get(att.id);
+          if (!rawFile) return;
+          try {
+            const formData = new FormData();
+            formData.append('files', rawFile);
+            formData.append('workspaceId', newId);
+            const res = await fetch('/api/ai/sources/upload', {
+              method: 'POST',
+              body: formData,
+            });
+            if (res.ok) {
+              const data = await res.json();
+              const uploaded = data?.sources?.[0] || data?.source;
+              if (uploaded) {
+                addDocumentSource(newId, uploaded);
+              }
             }
-          })
-          .catch((err) => {
+          } catch (err) {
             console.warn('[DOCIUM] Background source upload warning:', err);
-          });
-      }
+          }
+        })
+      );
     }
 
     updateComposerDraft({ prompt: '', attachments: [], urls: [] });

@@ -204,6 +204,8 @@ export interface DocumentItem extends BaseItem {
   footerAlign?: 'left' | 'center' | 'right';
   firstPageHeaderText?: string;
   firstPageFooterText?: string;
+  showHeaderLine?: boolean;
+  showFooterLine?: boolean;
   showPageNumbers?: boolean;
   pageNumberPosition?: 'bottom-center' | 'bottom-right' | 'top-right';
   differentFirstPage?: boolean;
@@ -421,6 +423,23 @@ export interface ResearchSource {
   indexedAt?: string;
   conversationId?: string;
   workspaceId?: string;
+  pageCount?: number;
+  slideCount?: number;
+  sheetNames?: string[];
+  visualPages?: number[];
+  outline?: string[];
+  ocrText?: string;
+  imageDescription?: string;
+  imageCards?: {
+    id: string;
+    filename: string;
+    page?: number;
+    slide?: number;
+    caption: string;
+    ocrText?: string;
+    analysisStatus: 'pending' | 'analyzed' | 'pending_vision' | 'failed';
+    hasChartsOrDiagrams?: boolean;
+  }[];
 }
 
 export type AgentRunStatus =
@@ -598,11 +617,21 @@ export interface ActiveDocumentContext {
   columns?: 1 | 2 | 3;
   headerText?: string;
   footerText?: string;
+  headerAlign?: 'left' | 'center' | 'right';
+  footerAlign?: 'left' | 'center' | 'right';
+  firstPageHeaderText?: string;
+  firstPageFooterText?: string;
+  showHeaderLine?: boolean;
+  showFooterLine?: boolean;
   showPageNumbers?: boolean;
+  pageNumberPosition?: 'bottom-center' | 'bottom-right' | 'top-right';
   differentFirstPage?: boolean;
   watermarkText?: string;
   pageColor?: string;
   pageBorder?: 'none' | 'box' | 'shadow' | 'double' | 'accent';
+  pageBorderColor?: string;
+  pageBorderWidth?: number;
+  pageBorderOffset?: 'edge' | 'margin' | 'wide';
   wordCount?: number;
   characterCount?: number;
   lastModified?: string;

@@ -18,6 +18,7 @@ export interface AiAvatarProps {
 export function AiAvatar({
   size = 'sm',
   className = '',
+  isGenerating = false,
   priority = false,
 }: AiAvatarProps) {
   let dimension = 20;
@@ -35,16 +36,28 @@ export function AiAvatar({
 
   return (
     <div
-      className={`relative shrink-0 flex items-center justify-center select-none ${className}`}
+      className={`relative shrink-0 flex items-center justify-center rounded-full select-none transition-colors duration-200 ${
+        isGenerating
+          ? 'bg-[var(--surface)] ring-1 ring-[var(--border)]'
+          : 'bg-transparent'
+      } ${className}`}
       style={{ width: dimension, height: dimension }}
       title="Docium AI"
     >
+      {isGenerating && (
+        <span
+          aria-hidden="true"
+          className="pointer-events-none absolute -inset-[3px] rounded-full border-[1.5px] border-[var(--border-subtle)] border-t-[var(--primary)] animate-spin"
+        />
+      )}
       <Image
         src="/docium-ai.png"
         alt="Docium AI"
         width={dimension}
         height={dimension}
-        className="w-full h-full object-contain"
+        className={`w-full h-full object-contain relative z-10 transition-transform duration-200 ${
+          isGenerating ? 'scale-[0.82]' : ''
+        }`}
         priority={priority}
       />
     </div>

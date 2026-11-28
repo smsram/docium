@@ -185,7 +185,7 @@ export function DocumentTopBar({
   ];
 
   return (
-    <div className="flex h-12 items-center justify-between border-b border-[var(--border)] bg-[var(--surface)] px-3 text-xs text-[var(--text)] select-none shrink-0 docium-topbar">
+    <div className="flex h-12 items-center justify-between border-b border-[var(--border)] bg-[var(--surface)] px-3 text-xs text-[var(--text)] select-none shrink-0 docium-topbar print:hidden">
       <input
         ref={fileInputRef}
         type="file"

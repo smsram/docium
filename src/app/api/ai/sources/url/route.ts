@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { safeFetch, validateUrl } from '@/lib/ai/security/ssrfGuard';
 import { ResearchSource } from '@/lib/types';
+import { ingestSource } from '@/lib/ai/ingestion';
+import { persistWorkspaceIngestion } from '@/lib/ai/serverIndexBridge';
 
 export async function POST(req: NextRequest) {
   try {
@@ -55,6 +57,23 @@ export async function POST(req: NextRequest) {
       workspaceId,
       conversationId,
     };
+
+    try {
+      const chunks = await ingestSource(newSource, workspaceId, {
+        provider: 'local',
+        model: 'local-multilingual',
+        dimensions: 384,
+        localOnlyPrivacy: false,
+        fallbackToLocal: true,
+      });
+      if (chunks.length > 0) {
+        newSource.chunkCount = chunks.length;
+        newSource.indexedAt = new Date().toISOString();
+        persistWorkspaceIngestion(workspaceId, chunks);
+      }
+    } catch {
+      // Non-fatal
+    }
 
     return NextResponse.json({
       success: true,

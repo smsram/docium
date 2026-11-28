@@ -11,10 +11,84 @@
  */
 
 import crypto from 'crypto';
+import { loadCachedRenderedPdfPage, saveCachedRenderedPdfPage } from '@/lib/storage/sourceStorage';
 
 async function getSharp() {
   const mod = await import('sharp');
   return mod.default || mod;
+}
+
+/**
+ * Optimizes large raster images before multimodal vision dispatch (keeps text sharp while
+ * bounding max dimension to 1568px and size under ~900KB).
+ */
+export async function optimizeImageBufferForVision(
+  buffer: Buffer,
+  mimeType: string,
+  options: { maxDimension?: number; maxBytes?: number; quality?: number } = {}
+): Promise<{ buffer: Buffer; mimeType: string; compressed: boolean; width?: number; height?: number }> {
+  const cleanMime = (mimeType || 'image/jpeg').toLowerCase();
+  if (!buffer || buffer.length === 0) {
+    return { buffer, mimeType: cleanMime, compressed: false };
+  }
+  // Keep vector SVG and potentially animated GIF untouched
+  if (cleanMime === 'image/svg+xml' || cleanMime === 'image/gif') {
+    return { buffer, mimeType: cleanMime, compressed: false };
+  }
+
+  const maxDim = options.maxDimension || 1568;
+  const maxBytes = options.maxBytes || 900 * 1024;
+  const quality = options.quality || 86;
+
+  try {
+    const sharp = await getSharp();
+    const s = sharp(buffer);
+    const meta = await s.metadata();
+    const width = meta.width || 0;
+    const height = meta.height || 0;
+
+    const needsResize = width > maxDim || height > maxDim;
+    const needsReencode = buffer.length > maxBytes;
+
+    if (!needsResize && !needsReencode) {
+      return { buffer, mimeType: cleanMime, compressed: false, width, height };
+    }
+
+    let pipeline = sharp(buffer);
+    if (needsResize) {
+      pipeline = pipeline.resize({
+        width: maxDim,
+        height: maxDim,
+        fit: 'inside',
+        withoutEnlargement: true,
+      });
+    }
+
+    // Encode crisp JPEG (with white background if PNG had alpha) or preserve WebP/PNG if compact
+    let outMime = 'image/jpeg';
+    let outBuf: Buffer;
+    if (cleanMime === 'image/webp') {
+      outMime = 'image/webp';
+      outBuf = await pipeline.webp({ quality }).toBuffer();
+    } else {
+      outBuf = await pipeline.flatten({ background: '#ffffff' }).jpeg({ quality, mozjpeg: true }).toBuffer();
+    }
+
+    // If re-encoding somehow made it larger, only keep if resized or original was huge PNG
+    if (outBuf.length < buffer.length || needsResize) {
+      const outMeta = await sharp(outBuf).metadata();
+      return {
+        buffer: outBuf,
+        mimeType: outMime,
+        compressed: true,
+        width: outMeta.width || width,
+        height: outMeta.height || height,
+      };
+    }
+    return { buffer, mimeType: cleanMime, compressed: false, width, height };
+  } catch {
+    return { buffer, mimeType: cleanMime, compressed: false };
+  }
 }
 
 export interface PdfPageText {
@@ -22,6 +96,10 @@ export interface PdfPageText {
   text: string;
   charCount: number;
   isImageOnly: boolean;
+  embeddedImageCount?: number;
+  hasEmbeddedImages?: boolean;
+  vectorOpCount?: number;
+  needsVisualInspection?: boolean;
 }
 
 export interface PdfDocumentAnalysis {
@@ -33,6 +111,8 @@ export interface PdfDocumentAnalysis {
   fullText: string;
   hasNativeText: boolean;
   imageOnlyPageCount: number;
+  hybridVisualPageCount?: number;
+  visualPages?: number[];
   error?: string;
 }
 
@@ -235,26 +315,87 @@ export async function extractPdfDocument(
       // Proceed even if metadata header is non-standard
     }
 
-    // 2. Extract per-page text
+    // 2. Extract per-page text + visual operator complexity (embedded images / vector charts)
     const { totalPages, text: rawPages } = await unpdf.extractText(doc, { mergePages: false });
     const pageTexts = Array.isArray(rawPages) ? rawPages : [String(rawPages || '')];
 
+    let pdfjsOps: Record<string, number> = {};
+    try {
+      const pdfjs = await unpdf.getResolvedPDFJS();
+      if (pdfjs && pdfjs.OPS) {
+        pdfjsOps = pdfjs.OPS as unknown as Record<string, number>;
+      }
+    } catch {
+      // Fallback safely if OPS constants unavailable
+    }
+
+    const IMAGE_OP_IDS = new Set<number>(
+      [
+        pdfjsOps.paintImageXObject,
+        pdfjsOps.paintInlineImageXObject,
+        pdfjsOps.paintImageMaskXObject,
+        pdfjsOps.paintImageXObjectRepeat,
+        pdfjsOps.paintFormXObjectBegin,
+      ].filter((v): v is number => typeof v === 'number')
+    );
+    const VECTOR_OP_IDS = new Set<number>(
+      [
+        pdfjsOps.stroke,
+        pdfjsOps.closeStroke,
+        pdfjsOps.fill,
+        pdfjsOps.eoFill,
+        pdfjsOps.fillStroke,
+        pdfjsOps.eoFillStroke,
+      ].filter((v): v is number => typeof v === 'number')
+    );
+
     const pages: PdfPageText[] = [];
+    const visualPages: number[] = [];
     let accumulatedText = '';
     let totalNativeChars = 0;
     let imageOnlyCount = 0;
+    let hybridVisualPageCount = 0;
+
+    // Inspect operator lists up to 80 pages to stay fast while flagging hybrid visual pages
+    const maxOpPages = Math.min(totalPages, 80);
 
     for (let i = 0; i < totalPages; i++) {
       const pageNum = i + 1;
       const rawText = (pageTexts[i] || '').trim();
-      // Clean up multiple spaces and excessive line breaks
       const cleanText = rawText.replace(/[ \t]+/g, ' ').replace(/\n{3,}/g, '\n\n');
       const charCount = cleanText.length;
-      // If a page has fewer than 40 chars, it is typically scanned, image-heavy, or a diagram
       const isImageOnly = charCount < 40;
+
+      let embeddedImageCount = 0;
+      let vectorOpCount = 0;
+
+      if (pageNum <= maxOpPages && IMAGE_OP_IDS.size > 0) {
+        try {
+          const pdfPage = await doc.getPage(pageNum);
+          const opList = await pdfPage.getOperatorList();
+          if (opList && Array.isArray(opList.fnArray)) {
+            for (const fn of opList.fnArray) {
+              if (IMAGE_OP_IDS.has(fn)) embeddedImageCount++;
+              else if (VECTOR_OP_IDS.has(fn)) vectorOpCount++;
+            }
+          }
+          pdfPage.cleanup?.();
+        } catch {
+          // Non-fatal: continue with text-only classification for this page
+        }
+      }
+
+      const hasEmbeddedImages = embeddedImageCount > 0;
+      const hasComplexVectorGraphics = vectorOpCount > 80;
+      const needsVisualInspection = isImageOnly || hasEmbeddedImages || hasComplexVectorGraphics;
 
       if (isImageOnly) {
         imageOnlyCount++;
+      } else if (hasEmbeddedImages || hasComplexVectorGraphics) {
+        hybridVisualPageCount++;
+      }
+      if (needsVisualInspection) {
+        visualPages.push(pageNum);
       }
       totalNativeChars += charCount;
 
@@ -263,9 +404,21 @@ export async function extractPdfDocument(
         text: cleanText,
         charCount,
         isImageOnly,
+        embeddedImageCount,
+        hasEmbeddedImages,
+        vectorOpCount,
+        needsVisualInspection,
       });
 
-      accumulatedText += `--- Page ${pageNum} ---\n${cleanText || '[Visual Page / No native text extracted]'}\n\n`;
+      const visualNote = isImageOnly
+        ? '[Visual Page / No native text extracted]'
+        : hasEmbeddedImages
+        ? `${cleanText}\n[Page ${pageNum} Visuals: Contains ${embeddedImageCount} embedded image/diagram object(s) — call inspect_source_image with page=${pageNum} if visual details are required]`
+        : hasComplexVectorGraphics
+        ? `${cleanText}\n[Page ${pageNum} Visuals: Contains complex vector graphics/charts — call inspect_source_image with page=${pageNum} if visual details are required]`
+        : cleanText;
+
+      accumulatedText += `--- Page ${pageNum} ---\n${visualNote}\n\n`;
     }
 
     const hasNativeText = totalNativeChars > 100;
@@ -279,6 +432,8 @@ export async function extractPdfDocument(
       fullText: accumulatedText.trim(),
       hasNativeText,
       imageOnlyPageCount: imageOnlyCount,
+      hybridVisualPageCount,
+      visualPages,
     };
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -326,6 +481,26 @@ export async function renderPdfPageToImage(
 
   const targetFormat = options.format || 'png';
   const targetMime = targetFormat === 'jpeg' ? 'image/jpeg' : 'image/png';
+  const renderScale = options.scale || 1.5;
+
+  // Check persistent disk cache first for instant repeat page visual inspections
+  const cachedPage = loadCachedRenderedPdfPage(buffer, pageNumber, renderScale, targetFormat, options.width);
+  if (cachedPage) {
+    const base64Data = cachedPage.buffer.toString('base64');
+    const dataUrl = `data:${targetMime};base64,${base64Data}`;
+    return {
+      success: true,
+      pageNumber,
+      mimeType: targetMime,
+      width: cachedPage.meta.width,
+      height: cachedPage.meta.height,
+      byteLength: cachedPage.buffer.length,
+      base64Length: dataUrl.length,
+      dataUrl,
+      buffer: cachedPage.buffer,
+      hash: cachedPage.meta.hash,
+    };
+  }
 
   try {
     const unpdf = await import('unpdf');
@@ -406,6 +581,13 @@ export async function renderPdfPageToImage(
     const base64Data = finalBuffer.toString('base64');
     const dataUrl = `data:${targetMime};base64,${base64Data}`;
     const hash = val.hash || crypto.createHash('sha256').update(finalBuffer).digest('hex');
+
+    saveCachedRenderedPdfPage(buffer, pageNumber, renderScale, targetFormat, options.width, finalBuffer, {
+      width: val.width!,
+      height: val.height!,
+      mimeType: targetMime,
+      hash,
+    });
 
     return {
       success: true,

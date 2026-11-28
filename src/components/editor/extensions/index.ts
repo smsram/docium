@@ -13,3 +13,4 @@ export { CustomTable, CustomTableCell, CustomTableHeader, CustomBlockquote } fro
 export { CustomCodeBlock } from './CustomCodeBlock';
 export { Indent } from './Indent';
 export { EquationNode, InlineEquationNode, formatMathExpression } from './EquationNode';
+export { FindReplaceHighlight } from './FindReplaceHighlight';

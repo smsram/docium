@@ -50,6 +50,17 @@ export function SourcesPanel({
     }
   };
 
+  const getSourceIconColor = (src: ResearchSource) => {
+    const t = (src.type || '').toLowerCase();
+    const mime = (src.mimeType || '').toLowerCase();
+    if (t === 'pdf' || mime === 'application/pdf' || src.title.toLowerCase().endsWith('.pdf')) return 'text-rose-500';
+    if (t === 'docx' || mime.includes('word')) return 'text-blue-600';
+    if (t === 'xlsx') return 'text-emerald-600';
+    if (t === 'pptx') return 'text-amber-600';
+    if (t === 'image' || mime.startsWith('image/')) return 'text-purple-500';
+    return 'text-[var(--primary)]';
+  };
+
   return (
     <div className="absolute top-12 right-0 bottom-0 z-50 w-full sm:w-80 max-w-full border-l border-[var(--border)] bg-[var(--surface)] shadow-2xl flex flex-col animate-in slide-in-from-right duration-200 select-none text-xs">
       {/* Header */}
@@ -87,14 +98,25 @@ export function SourcesPanel({
             const isProcessing = src.status === 'processing' || src.status === 'syncing';
             const isError = src.status === 'error';
 
-            return (
+            const getSourceIconColor = (src: ResearchSource) => {
+    const t = (src.type || '').toLowerCase();
+    const mime = (src.mimeType || '').toLowerCase();
+    if (t === 'pdf' || mime === 'application/pdf' || src.title.toLowerCase().endsWith('.pdf')) return 'text-rose-500';
+    if (t === 'docx' || mime.includes('word')) return 'text-blue-600';
+    if (t === 'xlsx') return 'text-emerald-600';
+    if (t === 'pptx') return 'text-amber-600';
+    if (t === 'image' || mime.startsWith('image/')) return 'text-purple-500';
+    return 'text-[var(--primary)]';
+  };
+
+  return (
               <div
                 key={src.id}
                 className="group relative flex flex-col p-2.5 rounded-xl border border-[var(--border)] bg-[var(--surface-elevated)] hover:border-[var(--primary)]/40 transition-colors"
               >
                 <div className="flex items-start justify-between gap-2">
                   <div className="flex items-start gap-2 min-w-0">
-                    <div className="p-1.5 rounded-lg bg-[var(--surface)] text-[var(--primary)] border border-[var(--border-subtle)] shrink-0 mt-0.5">
+                    <div className={`p-1.5 rounded-lg bg-[var(--surface)] border border-[var(--border-subtle)] shrink-0 mt-0.5 ${getSourceIconColor(src)}`}>
                       <Icon className="h-4 w-4" />
                     </div>
                     <div className="min-w-0">
@@ -102,7 +124,7 @@ export function SourcesPanel({
                         {src.title}
                       </h4>
                       <div className="flex items-center gap-2 mt-0.5 text-[10px] text-[var(--text-muted)] font-mono">
-                        <span className="uppercase">{src.type}</span>
+                        <span className={`uppercase font-semibold ${getSourceIconColor(src)}`}>{src.type}</span>
                         {src.fileSize && <span>• {src.fileSize}</span>}
                         {src.chunkCount !== undefined && <span>• {src.chunkCount} chunks</span>}
                       </div>

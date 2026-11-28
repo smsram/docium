@@ -65,6 +65,7 @@ import {
 } from '@/lib/types';
 import { PAPER_SIZES_MM, getResolvedMargins } from './pageMetrics';
 import { formatMathExpression } from '../extensions/EquationNode';
+import { fetchTrueTypeFontBytes, normalizeExportFontName } from './fontLoader';
 
 export interface DocxExportOptions {
   jsonContent?: Record<string, any>;
@@ -74,13 +75,22 @@ export interface DocxExportOptions {
   columns?: 1 | 2 | 3;
   headerText?: string;
   footerText?: string;
+  headerAlign?: 'left' | 'center' | 'right';
+  footerAlign?: 'left' | 'center' | 'right';
   firstPageHeaderText?: string;
   firstPageFooterText?: string;
+  showHeaderLine?: boolean;
+  showFooterLine?: boolean;
   showPageNumbers?: boolean;
+  pageNumberPosition?: 'bottom-center' | 'bottom-right' | 'top-right';
   differentFirstPage?: boolean;
   watermarkText?: string;
   pageColor?: string;
   pageBorder?: 'none' | 'box' | 'shadow' | 'double' | 'accent';
+  pageBorderColor?: string;
+  pageBorderWidth?: number;
+  pageBorderOffset?: 'edge' | 'margin' | 'wide';
+  defaultFontFamily?: string;
 }
 
 const MM_TO_TWIPS = 56.6929134; // 1 inch = 25.4mm = 1440 twips -> 56.6929 twips/mm
@@ -129,9 +139,8 @@ function parsePtSize(raw: string | number | null | undefined, fallbackPt: number
   return Number.isFinite(v) ? v : fallbackPt;
 }
 
-function primaryFontName(raw: string | null | undefined): string {
-  if (!raw) return 'Calibri';
-  return raw.split(',')[0].replace(/['"]/g, '').trim() || 'Calibri';
+function primaryFontName(raw: string | null | undefined, fallback = 'Calibri'): string {
+  return normalizeExportFontName(raw, fallback);
 }
 
 function mapAlignment(align?: string | null) {
@@ -217,44 +226,66 @@ function buildFloatingSpec(alignMode: string): ShapeFloating | undefined {
   return undefined;
 }
 
+async function rasterizeImageViaDom(
+  src: string,
+  targetW?: number,
+  targetH?: number
+): Promise<{ data: Uint8Array; type: 'png'; width: number; height: number } | null> {
+  if (typeof window === 'undefined' || typeof document === 'undefined') return null;
+  return await new Promise((resolve) => {
+    const img = new window.Image();
+    img.crossOrigin = 'anonymous';
+    img.onload = () => {
+      const natW = img.naturalWidth || targetW || 400;
+      const natH = img.naturalHeight || targetH || 260;
+      const outW = targetW && targetW > 0 ? targetW : Math.min(560, natW);
+      const outH =
+        targetH && targetH > 0
+          ? targetH
+          : Math.max(24, Math.round(outW * (natH / Math.max(1, natW))));
+      const scale = 2;
+      const canvas = document.createElement('canvas');
+      canvas.width = Math.max(2, Math.round(natW * scale));
+      canvas.height = Math.max(2, Math.round(natH * scale));
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return resolve(null);
+      ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+      canvas.toBlob((blob) => {
+        if (!blob) return resolve(null);
+        blob.arrayBuffer().then((buf) => {
+          resolve({ data: new Uint8Array(buf), type: 'png', width: outW, height: outH });
+        });
+      }, 'image/png');
+    };
+    img.onerror = () => resolve(null);
+    img.src = src;
+  });
+}
+
 async function resolveImageBytes(
   src: string,
   targetW = 400,
-  targetH = 260
+  targetH?: number
 ): Promise<{ data: Uint8Array; type: 'png' | 'jpg' | 'gif' | 'bmp'; width: number; height: number } | null> {
   if (!src || typeof window === 'undefined') return null;
 
   try {
-    // Rasterize SVG data URLs to crisp 2x PNG so every version of Word displays them reliably
-    if (src.startsWith('data:image/svg+xml')) {
-      return await new Promise((resolve) => {
-        const img = new window.Image();
-        img.onload = () => {
-          const w = img.naturalWidth || targetW;
-          const h = img.naturalHeight || targetH;
-          const canvas = document.createElement('canvas');
-          canvas.width = w * 2;
-          canvas.height = h * 2;
-          const ctx = canvas.getContext('2d');
-          if (!ctx) return resolve(null);
-          ctx.scale(2, 2);
-          ctx.drawImage(img, 0, 0, w, h);
-          canvas.toBlob((blob) => {
-            if (!blob) return resolve(null);
-            blob.arrayBuffer().then((buf) => {
-              resolve({ data: new Uint8Array(buf), type: 'png', width: targetW || w, height: targetH || h });
-            });
-          }, 'image/png');
-        };
-        img.onerror = () => resolve(null);
-        img.src = src;
-      });
+    // Rasterize SVG, WebP, AVIF, etc. to crisp 2x PNG so every version of Word displays them reliably
+    if (
+      src.startsWith('data:image/svg+xml') ||
+      src.startsWith('data:image/webp') ||
+      src.startsWith('data:image/avif')
+    ) {
+      return await rasterizeImageViaDom(src, targetW, targetH);
     }
 
     if (src.startsWith('data:image/')) {
       const mimeMatch = src.match(/^data:image\/([a-zA-Z0-9+.-]+);base64,(.*)$/);
       if (mimeMatch) {
         const rawExt = mimeMatch[1].toLowerCase();
+        if (rawExt !== 'png' && rawExt !== 'jpeg' && rawExt !== 'jpg' && rawExt !== 'gif' && rawExt !== 'bmp') {
+          return await rasterizeImageViaDom(src, targetW, targetH);
+        }
         const type: 'png' | 'jpg' | 'gif' | 'bmp' =
           rawExt === 'jpeg' || rawExt === 'jpg'
             ? 'jpg'
@@ -268,20 +299,52 @@ async function resolveImageBytes(
         for (let i = 0; i < binary.length; i++) {
           bytes[i] = binary.charCodeAt(i);
         }
-        return { data: bytes, type, width: targetW, height: targetH };
+        let resolvedW = targetW;
+        let resolvedH = targetH || 0;
+        if (!resolvedH && typeof window !== 'undefined') {
+          const measured = await new Promise<{ w: number; h: number } | null>((resolve) => {
+            const img = new window.Image();
+            img.onload = () => resolve({ w: img.naturalWidth, h: img.naturalHeight });
+            img.onerror = () => resolve(null);
+            img.src = src;
+          });
+          resolvedH =
+            measured && measured.w > 0
+              ? Math.max(24, Math.round(resolvedW * (measured.h / measured.w)))
+              : Math.round(resolvedW * 0.62);
+        }
+        return { data: bytes, type, width: resolvedW, height: resolvedH || Math.round(resolvedW * 0.62) };
       }
     }
 
     const resp = await fetch(src);
     if (!resp.ok) return null;
-    const contentType = resp.headers.get('content-type') || 'image/png';
+    const contentType = (resp.headers.get('content-type') || 'image/png').toLowerCase();
+    if (contentType.includes('svg') || contentType.includes('webp') || contentType.includes('avif')) {
+      return await rasterizeImageViaDom(src, targetW, targetH);
+    }
     const buf = await resp.arrayBuffer();
     const type: 'png' | 'jpg' | 'gif' | 'bmp' = contentType.includes('jpeg') || contentType.includes('jpg')
       ? 'jpg'
       : contentType.includes('gif')
       ? 'gif'
+      : contentType.includes('bmp')
+      ? 'bmp'
       : 'png';
-    return { data: new Uint8Array(buf), type, width: targetW, height: targetH };
+    let resolvedH = targetH || 0;
+    if (!resolvedH && typeof window !== 'undefined') {
+      const measured = await new Promise<{ w: number; h: number } | null>((resolve) => {
+        const img = new window.Image();
+        img.onload = () => resolve({ w: img.naturalWidth, h: img.naturalHeight });
+        img.onerror = () => resolve(null);
+        img.src = src;
+      });
+      resolvedH =
+        measured && measured.w > 0
+          ? Math.max(24, Math.round(targetW * (measured.h / measured.w)))
+          : Math.round(targetW * 0.62);
+    }
+    return { data: new Uint8Array(buf), type, width: targetW, height: resolvedH || Math.round(targetW * 0.62) };
   } catch {
     return null;
   }
@@ -347,12 +410,42 @@ function parseHtmlFallbackToJson(html: string): Record<string, any> {
     return out;
   };
 
-  const parseBlockElements = (parent: Element): any[] => {
+  interface InheritedInlineStyle {
+    fontFamily?: string;
+    fontSize?: string;
+    color?: string;
+  }
+
+  function mergeInheritedStyle(base: InheritedInlineStyle | undefined, el: HTMLElement): InheritedInlineStyle {
+    return {
+      fontFamily: el.style?.fontFamily || base?.fontFamily,
+      fontSize: el.style?.fontSize || base?.fontSize,
+      color: el.style?.color || base?.color,
+    };
+  }
+
+  function applyInheritedInlineMarks(nodes: any[], inherited?: InheritedInlineStyle): any[] {
+    if (!inherited || (!inherited.fontFamily && !inherited.fontSize && !inherited.color)) return nodes;
+    return nodes.map((n) => {
+      if (n.type !== 'text') return n;
+      const marks = Array.isArray(n.marks) ? [...n.marks] : [];
+      const hasFont = marks.some((m) => (m.type === 'fontFamily' && m.attrs?.font) || (m.type === 'textStyle' && m.attrs?.fontFamily));
+      const hasSize = marks.some((m) => (m.type === 'fontSize' && m.attrs?.size) || (m.type === 'textStyle' && m.attrs?.fontSize));
+      const hasColor = marks.some((m) => m.type === 'textStyle' && m.attrs?.color);
+      if (!hasFont && inherited.fontFamily) marks.push({ type: 'fontFamily', attrs: { font: inherited.fontFamily } });
+      if (!hasSize && inherited.fontSize) marks.push({ type: 'fontSize', attrs: { size: inherited.fontSize } });
+      if (!hasColor && inherited.color) marks.push({ type: 'textStyle', attrs: { color: inherited.color } });
+      return marks.length > 0 ? { ...n, marks } : n;
+    });
+  }
+
+  const parseBlockElements = (parent: Element, inherited?: InheritedInlineStyle): any[] => {
     const blocks: any[] = [];
     Array.from(parent.children).forEach((el) => {
       const hel = el as HTMLElement;
       const tag = hel.tagName.toLowerCase();
       const dataType = hel.getAttribute('data-type');
+      const nextInherited = mergeInheritedStyle(inherited, hel);
 
       if (dataType === 'page-break' || hel.classList.contains('docium-page-break')) {
         blocks.push({ type: 'pageBreak' });
@@ -385,13 +478,13 @@ function parseHtmlFallbackToJson(html: string): Record<string, any> {
             borderStyle: hel.getAttribute('data-border-style') || 'solid',
             alignment: hel.getAttribute('data-alignment') || 'full',
           },
-          content: parseBlockElements(hel),
+          content: parseBlockElements(hel, nextInherited),
         });
       } else if (dataType === 'callout') {
         blocks.push({
           type: 'callout',
           attrs: { type: hel.getAttribute('data-callout-type') || 'info' },
-          content: parseBlockElements(hel),
+          content: parseBlockElements(hel, nextInherited),
         });
       } else if (dataType === 'docium-equation') {
         blocks.push({
@@ -402,26 +495,30 @@ function parseHtmlFallbackToJson(html: string): Record<string, any> {
         blocks.push({
           type: 'heading',
           attrs: { level: parseInt(tag[1], 10), textAlign: hel.style.textAlign || 'left' },
-          content: parseInlineNodes(hel),
+          content: applyInheritedInlineMarks(parseInlineNodes(hel), nextInherited),
         });
       } else if (tag === 'p') {
         blocks.push({
           type: 'paragraph',
           attrs: { textAlign: hel.style.textAlign || 'left' },
-          content: parseInlineNodes(hel),
+          content: applyInheritedInlineMarks(parseInlineNodes(hel), nextInherited),
         });
       } else if (tag === 'ul' || tag === 'ol') {
         const isTask = hel.getAttribute('data-type') === 'taskList';
         const items = Array.from(hel.children)
           .filter((li) => li.tagName.toLowerCase() === 'li')
-          .map((li) => ({
-            type: isTask ? 'taskItem' : 'listItem',
-            attrs: isTask ? { checked: li.getAttribute('data-checked') === 'true' } : {},
-            content:
-              li.querySelector('p')
-                ? parseBlockElements(li)
-                : [{ type: 'paragraph', content: parseInlineNodes(li) }],
-          }));
+          .map((li) => {
+            const liEl = li as HTMLElement;
+            const liInherited = mergeInheritedStyle(nextInherited, liEl);
+            return {
+              type: isTask ? 'taskItem' : 'listItem',
+              attrs: isTask ? { checked: liEl.getAttribute('data-checked') === 'true' } : {},
+              content:
+                liEl.querySelector('p')
+                  ? parseBlockElements(liEl, liInherited)
+                  : [{ type: 'paragraph', content: applyInheritedInlineMarks(parseInlineNodes(liEl), liInherited) }],
+            };
+          });
         blocks.push({
           type: isTask ? 'taskList' : tag === 'ol' ? 'orderedList' : 'bulletList',
           content: items,
@@ -429,12 +526,19 @@ function parseHtmlFallbackToJson(html: string): Record<string, any> {
       } else if (tag === 'blockquote') {
         blocks.push({
           type: 'blockquote',
-          content: hel.children.length > 0 ? parseBlockElements(hel) : [{ type: 'paragraph', content: parseInlineNodes(hel) }],
+          content:
+            hel.children.length > 0
+              ? parseBlockElements(hel, nextInherited)
+              : [{ type: 'paragraph', content: applyInheritedInlineMarks(parseInlineNodes(hel), nextInherited) }],
         });
-      } else if (tag === 'pre') {
+      } else if (tag === 'pre' || hel.getAttribute('data-type') === 'docium-codeblock') {
+        const clone = hel.cloneNode(true) as HTMLElement;
+        clone.querySelectorAll('[data-docium-ui-only="true"], [data-codeblock-ui="true"]').forEach((n) => n.remove());
+        const codeEl = clone.querySelector('code') || clone.querySelector('pre') || clone;
         blocks.push({
           type: 'codeBlock',
-          content: [{ type: 'text', text: hel.textContent || '' }],
+          attrs: { language: hel.getAttribute('data-language') || 'plaintext' },
+          content: [{ type: 'text', text: codeEl.textContent || '' }],
         });
       } else if (tag === 'hr') {
         blocks.push({ type: 'horizontalRule' });
@@ -455,6 +559,7 @@ function parseHtmlFallbackToJson(html: string): Record<string, any> {
             content: Array.from(tr.children).map((cell) => {
               const cel = cell as HTMLElement;
               const isHeader = cel.tagName.toLowerCase() === 'th';
+              const cellInherited = mergeInheritedStyle(nextInherited, cel);
               return {
                 type: isHeader ? 'tableHeader' : 'tableCell',
                 attrs: {
@@ -462,7 +567,10 @@ function parseHtmlFallbackToJson(html: string): Record<string, any> {
                   rowspan: parseInt(cel.getAttribute('rowspan') || '1', 10),
                   backgroundColor: cel.getAttribute('data-bg-color') || cel.style.backgroundColor || null,
                 },
-                content: cel.children.length > 0 ? parseBlockElements(cel) : [{ type: 'paragraph', content: parseInlineNodes(cel) }],
+                content:
+                  cel.children.length > 0
+                    ? parseBlockElements(cel, cellInherited)
+                    : [{ type: 'paragraph', content: applyInheritedInlineMarks(parseInlineNodes(cel), cellInherited) }],
               };
             }),
           }));
@@ -473,13 +581,93 @@ function parseHtmlFallbackToJson(html: string): Record<string, any> {
           });
         }
       } else if (hel.children.length > 0) {
-        blocks.push(...parseBlockElements(hel));
+        blocks.push(...parseBlockElements(hel, nextInherited));
       }
     });
     return blocks;
   };
 
+  // Upgrade legacy <font face color> attributes before walking blocks
+  dom.body.querySelectorAll('font').forEach((fontEl) => {
+    const face = fontEl.getAttribute('face');
+    const color = fontEl.getAttribute('color');
+    const span = dom.createElement('span');
+    if (face) span.style.fontFamily = face;
+    if (color) span.style.color = color;
+    while (fontEl.firstChild) span.appendChild(fontEl.firstChild);
+    fontEl.replaceWith(span);
+  });
+
   return { type: 'doc', content: parseBlockElements(dom.body) };
+}
+
+/**
+ * Reads live workspace table column widths (without mutating source ProseMirror JSON
+ * or injecting hard page breaks on soft-wrapped blocks that would collide with Word's natural pagination).
+ */
+function annotateNodesFromWorkspaceDom(rawNodes: any[]): any[] {
+  if (
+    typeof window === 'undefined' ||
+    typeof document === 'undefined' ||
+    typeof document.getElementById !== 'function' ||
+    rawNodes.length === 0
+  ) {
+    return rawNodes;
+  }
+
+  const paginatedSheet = document.getElementById('docium-paginated-sheet');
+  const contentEl = paginatedSheet?.querySelector('.docium-paper-content') as HTMLElement | null;
+  const tiptapEl = contentEl?.querySelector('.tiptap') as HTMLElement | null;
+  if (!paginatedSheet || !contentEl || !tiptapEl) return rawNodes;
+
+  const domChildren = Array.from(tiptapEl.children) as HTMLElement[];
+  if (domChildren.length !== rawNodes.length) {
+    return rawNodes;
+  }
+
+  const scalerEl = paginatedSheet.closest('.docium-zoom-scaler') as HTMLElement | null;
+  const prevTransform = scalerEl?.style.transform || '';
+  const prevTransition = scalerEl?.style.transition || '';
+  if (scalerEl) {
+    scalerEl.style.transition = 'none';
+    scalerEl.style.transform = 'scale(1)';
+    void scalerEl.offsetHeight;
+  }
+
+  try {
+    return rawNodes.map((node, idx) => {
+      const el = domChildren[idx];
+      let measuredCols: number[] | undefined;
+      if (node.type === 'table') {
+        const tbl = el.tagName === 'TABLE' ? el : el.querySelector('table');
+        const firstRow = tbl?.querySelector('tr');
+        if (firstRow) {
+          const cols: number[] = [];
+          Array.from(firstRow.children).forEach((cell) => {
+            const cEl = cell as HTMLElement;
+            const span = Math.max(1, parseInt(cEl.getAttribute('colspan') || '1', 10) || 1);
+            const cellW = Math.max(24, cEl.getBoundingClientRect().width / span);
+            for (let s = 0; s < span; s++) cols.push(cellW);
+          });
+          if (cols.length > 0) measuredCols = cols;
+        }
+      }
+
+      if (!measuredCols) return node;
+      return {
+        ...node,
+        attrs: {
+          ...(node.attrs || {}),
+          _measuredColWidthsPx: measuredCols,
+        },
+      };
+    });
+  } finally {
+    if (scalerEl) {
+      scalerEl.style.transform = prevTransform;
+      scalerEl.style.transition = prevTransition;
+    }
+  }
 }
 
 /**
@@ -718,6 +906,24 @@ function latexToDocxMath(rawLatex: string): DocxMath {
   });
 }
 
+function splitTextPreservingEmojis(text: string): Array<{ text: string; isEmoji: boolean }> {
+  const emojiRegex = /((?:\p{Extended_Pictographic}|\p{Emoji_Presentation})(?:\uFE0F|\uFE0E|[\u{1F3FB}-\u{1F3FF}]|\u200D(?:\p{Extended_Pictographic}|\p{Emoji_Presentation}|\u2640|\u2642)\uFE0F?)*)/gu;
+  const parts: Array<{ text: string; isEmoji: boolean }> = [];
+  let lastIndex = 0;
+  let match: RegExpExecArray | null;
+  while ((match = emojiRegex.exec(text)) !== null) {
+    if (match.index > lastIndex) {
+      parts.push({ text: text.slice(lastIndex, match.index), isEmoji: false });
+    }
+    parts.push({ text: match[0], isEmoji: true });
+    lastIndex = match.index + match[0].length;
+  }
+  if (lastIndex < text.length) {
+    parts.push({ text: text.slice(lastIndex), isEmoji: false });
+  }
+  return parts.length > 0 ? parts : [{ text, isEmoji: false }];
+}
+
 function buildInlineRuns(
   contentNodes: any[] | undefined,
   defaults: { fontSizePt: number; colorHex: string; bold?: boolean; italics?: boolean; fontFamily?: string }
@@ -725,10 +931,24 @@ function buildInlineRuns(
   if (!contentNodes || contentNodes.length === 0) return [];
 
   const children: (TextRun | ExternalHyperlink | DocxMath)[] = [];
+  let lastRunFont = defaults.fontFamily || 'Calibri';
+  let lastRunPt = defaults.fontSizePt;
 
   for (const item of contentNodes) {
     if (item.type === 'hardBreak') {
-      children.push(new TextRun({ break: 1 }));
+      children.push(
+        new TextRun({
+          break: 1,
+          font: {
+            name: lastRunFont,
+            ascii: lastRunFont,
+            hAnsi: lastRunFont,
+            cs: lastRunFont,
+            eastAsia: lastRunFont,
+          },
+          size: Math.round(lastRunPt * PT_TO_HALF_PT),
+        })
+      );
       continue;
     }
     if (item.type === 'inlineEquation') {
@@ -766,62 +986,114 @@ function buildInlineRuns(
         fontFam = 'Consolas';
         colorHex = '245C45';
         highlightHex = 'F1F5F2';
-      } else if (m.type === 'textStyle' && m.attrs?.color) {
-        colorHex = cleanHex(m.attrs.color, colorHex);
+      } else if (m.type === 'link' && m.attrs?.href) {
+        linkHref = String(m.attrs.href);
+      } else if (m.type === 'highlight') {
+        highlightHex = cleanHex(m.attrs?.color || '#FEF08A', 'FEF08A');
+      }
+    }
+
+    // Apply explicit font / size / color overrides AFTER structural & code defaults so explicit styles always win
+    for (const m of marks) {
+      if (m.type === 'textStyle') {
+        if (m.attrs?.color) colorHex = cleanHex(m.attrs.color, colorHex);
+        if (m.attrs?.fontSize) fontPt = parsePtSize(m.attrs.fontSize, fontPt);
+        if (m.attrs?.fontFamily) fontFam = primaryFontName(m.attrs.fontFamily, fontFam);
       } else if (m.type === 'fontSize' && m.attrs?.size) {
         fontPt = parsePtSize(m.attrs.size, fontPt);
       } else if (m.type === 'fontFamily' && m.attrs?.font) {
-        fontFam = primaryFontName(m.attrs.font);
-      } else if (m.type === 'highlight') {
-        highlightHex = cleanHex(m.attrs?.color || '#FEF08A', 'FEF08A');
-      } else if (m.type === 'link' && m.attrs?.href) {
-        linkHref = String(m.attrs.href);
+        fontFam = primaryFontName(m.attrs.font, fontFam);
       }
     }
 
     const effectivePt = isCode ? Math.max(8, fontPt - 1) : fontPt;
-    const run = new TextRun({
-      text: item.text,
-      bold: isBold,
-      italics: isItalic,
-      strike: isStrike,
-      subScript: isSub,
-      superScript: isSup,
-      font: fontFam,
-      size: Math.round(effectivePt * PT_TO_HALF_PT),
-      color: linkHref && colorHex === defaults.colorHex ? '0563C1' : colorHex,
-      underline: isUnderline || linkHref ? { type: UnderlineType.SINGLE } : undefined,
-      shading: highlightHex
-        ? { type: ShadingType.CLEAR, color: 'auto', fill: highlightHex }
-        : undefined,
+    lastRunFont = fontFam;
+    lastRunPt = effectivePt;
+    const segments = splitTextPreservingEmojis(String(item.text));
+    const segmentRuns = segments.map((seg) => {
+      const targetFont = seg.isEmoji ? 'Segoe UI Emoji' : fontFam;
+      return new TextRun({
+        text: seg.text,
+        bold: isBold,
+        italics: isItalic,
+        strike: isStrike,
+        subScript: isSub,
+        superScript: isSup,
+        font: {
+          name: targetFont,
+          ascii: targetFont,
+          hAnsi: targetFont,
+          cs: targetFont,
+          eastAsia: targetFont,
+        },
+        size: Math.round(effectivePt * PT_TO_HALF_PT),
+        color: linkHref && colorHex === defaults.colorHex ? '0563C1' : colorHex,
+        underline: isUnderline || linkHref ? { type: UnderlineType.SINGLE } : undefined,
+        shading: highlightHex
+          ? { type: ShadingType.CLEAR, color: 'auto', fill: highlightHex }
+          : undefined,
+      });
     });
 
     if (linkHref) {
       children.push(
         new ExternalHyperlink({
           link: linkHref,
-          children: [run],
+          children: segmentRuns,
         })
       );
     } else {
-      children.push(run);
+      children.push(...segmentRuns);
     }
   }
 
   return children;
 }
 
-function parseSpacingTwips(nodeAttrs: Record<string, any> | undefined, defaultAfterPt: number, defaultBeforePt = 0) {
+function mapLineHeightToCssMultiplier(rawLh: number): number {
+  if (Math.abs(rawLh - 1.0) < 0.03) return 1.18;
+  if (Math.abs(rawLh - 1.15) < 0.03) return 1.38;
+  if (Math.abs(rawLh - 1.5) < 0.03) return 1.65;
+  if (Math.abs(rawLh - 2.0) < 0.03) return 2.15;
+  return Math.round(rawLh * 1.15 * 100) / 100;
+}
+
+function getMaxRunFontPt(contentNodes: any[] | undefined, fallbackPt: number): number {
+  let maxPt = fallbackPt;
+  for (const item of contentNodes || []) {
+    if (item?.type !== 'text' || !Array.isArray(item.marks)) continue;
+    for (const m of item.marks) {
+      if (m?.type === 'fontSize' && m.attrs?.size) {
+        maxPt = Math.max(maxPt, parsePtSize(m.attrs.size, fallbackPt));
+      } else if (m?.type === 'textStyle' && m.attrs?.fontSize) {
+        maxPt = Math.max(maxPt, parsePtSize(m.attrs.fontSize, fallbackPt));
+      }
+    }
+  }
+  return maxPt;
+}
+
+function parseSpacingTwips(
+  nodeAttrs: Record<string, any> | undefined,
+  defaultAfterPt: number,
+  defaultBeforePt = 0,
+  fontSizePt = 11,
+  defaultLineHeight = 1.38
+) {
   let beforeTwips = Math.round(defaultBeforePt * PT_TO_TWIPS);
   let afterTwips = Math.round(defaultAfterPt * PT_TO_TWIPS);
-  let lineTwips = 276; // Word 1.15 multiple = 1.15 * 240 = 276
+  let effLh = defaultLineHeight;
 
   if (nodeAttrs?.lineHeight) {
     const lh = parseFloat(String(nodeAttrs.lineHeight));
     if (Number.isFinite(lh) && lh > 0) {
-      lineTwips = Math.round(lh * 240);
-      if (!nodeAttrs.marginBottom && lh <= 1.0) {
-        afterTwips = 40; // 2pt
+      effLh = mapLineHeightToCssMultiplier(lh);
+      if (!nodeAttrs.marginBottom && defaultAfterPt > 0) {
+        if (lh <= 1.0) {
+          afterTwips = 40; // 2pt matching LineHeight.ts
+        } else if (lh <= 1.15) {
+          afterTwips = 120; // 6pt matching LineHeight.ts
+        }
       }
     }
   }
@@ -837,39 +1109,105 @@ function parseSpacingTwips(nodeAttrs: Record<string, any> | undefined, defaultAf
   return {
     before: beforeTwips,
     after: afterTwips,
-    line: lineTwips,
-    lineRule: LineRuleType.AUTO,
+    line: Math.max(200, Math.round(fontSizePt * effLh * PT_TO_TWIPS)),
+    lineRule: LineRuleType.AT_LEAST,
   };
+}
+
+interface NumberingRegistryItem {
+  reference: string;
+  start: number;
 }
 
 async function convertNodesToDocxBlocks(
   rawNodes: any[],
   printableWidthTwips: number,
   printableWidthPx: number,
-  options?: { insideCell?: boolean; defaultColorHex?: string }
+  options?: {
+    insideCell?: boolean;
+    isHeaderCell?: boolean;
+    defaultColorHex?: string;
+    defaultFontFamily?: string;
+    isTopLevel?: boolean;
+    numberingRegistry?: NumberingRegistryItem[];
+    cellParagraphSpacing?: boolean;
+    blockquoteBorderColor?: string;
+    extraLeftIndentTwips?: number;
+  }
 ): Promise<(Paragraph | DocxTable)[]> {
-  const nodes = mergeContinuationNodes(rawNodes || []);
+  const nodes = options?.isTopLevel ? mergeContinuationNodes(annotateNodesFromWorkspaceDom(rawNodes || [])) : rawNodes || [];
   const blocks: (Paragraph | DocxTable)[] = [];
   const baseColor = options?.defaultColorHex || '171C19';
+  const baseFont = options?.defaultFontFamily || 'Calibri';
+  const numberingRegistry = options?.numberingRegistry || [];
+  const bqBorder = options?.blockquoteBorderColor
+    ? { left: { color: options.blockquoteBorderColor, space: 10, style: BorderStyle.SINGLE, size: 24 } }
+    : undefined;
+  const extraIndent = options?.extraLeftIndentTwips || 0;
 
-  for (const node of nodes) {
+  let prevAfterPt = 0;
+  let pendingTableAfterPt = 0;
+
+  for (let nodeIdx = 0; nodeIdx < nodes.length; nodeIdx++) {
+    const node = nodes[nodeIdx];
     const type = node.type;
     const attrs = node.attrs || {};
+    const isVeryFirstTopNode = Boolean(options?.isTopLevel && nodeIdx === 0);
+    const pageBreakBefore = Boolean(node._pageBreakBefore) || undefined;
+    if (pageBreakBefore) {
+      prevAfterPt = 0;
+      pendingTableAfterPt = 0;
+    }
+    const collapseBeforePt = (rawBeforePt: number): number => {
+      if (isVeryFirstTopNode || pageBreakBefore) return 0;
+      const targetBeforePt = Math.max(rawBeforePt, pendingTableAfterPt);
+      return Math.max(0, targetBeforePt - prevAfterPt);
+    };
+    const nextNode = nodes[nodeIdx + 1];
+    const nextIsTableBox =
+      !options?.insideCell &&
+      nextNode &&
+      (nextNode.type === 'table' || nextNode.type === 'callout' || nextNode.type === 'codeBlock') &&
+      !nextNode._pageBreakBefore;
+    const withNextBoxCollapse = (rawAfterPt: number, explicitMarginBottom?: unknown): number => {
+      if (explicitMarginBottom || !nextIsTableBox) return rawAfterPt;
+      return Math.max(rawAfterPt, 8);
+    };
+    const flushConsecutiveTableGap = () => {
+      if (pendingTableAfterPt > 0 && !pageBreakBefore) {
+        const afterGapTwips = Math.max(0, Math.round((pendingTableAfterPt - 1) * PT_TO_TWIPS));
+        blocks.push(
+          new Paragraph({
+            spacing: { before: 0, after: afterGapTwips, line: 20, lineRule: LineRuleType.EXACT },
+            children: [new TextRun({ text: '', size: 2 })],
+          })
+        );
+        pendingTableAfterPt = 0;
+      }
+    };
 
     if (type === 'pageBreak' || type === 'sectionBreak') {
       blocks.push(new Paragraph({ children: [new DocxPageBreak()] }));
+      prevAfterPt = 0;
+      pendingTableAfterPt = 0;
       continue;
     }
 
     if (type === 'horizontalRule') {
+      const beforeTwips = Math.round(collapseBeforePt(10) * PT_TO_TWIPS);
       blocks.push(
         new Paragraph({
+          pageBreakBefore,
+          keepNext: true,
           border: {
             bottom: { color: 'CBD5E1', space: 1, style: BorderStyle.SINGLE, size: 6 },
           },
-          spacing: { before: 120, after: 120 },
+          spacing: { before: beforeTwips, after: 200, line: 20, lineRule: LineRuleType.EXACT },
+          children: [new TextRun({ text: '', size: 2 })],
         })
       );
+      prevAfterPt = 10;
+      pendingTableAfterPt = 0;
       continue;
     }
 
@@ -877,65 +1215,114 @@ async function convertNodesToDocxBlocks(
       const level = Math.min(6, Math.max(1, Number(attrs.level || 1)));
       const headingSpecs: Record<
         number,
-        { pt: number; color: string; beforePt: number; afterPt: number; italic?: boolean; headingLvl: any }
+        { pt: number; color: string; beforePt: number; afterPt: number; lh: number; italic?: boolean; headingLvl: any }
       > = {
-        1: { pt: 20, color: '245C45', beforePt: 14, afterPt: 6, headingLvl: HeadingLevel.HEADING_1 },
-        2: { pt: 15, color: '398568', beforePt: 12, afterPt: 4, headingLvl: HeadingLevel.HEADING_2 },
-        3: { pt: 12.5, color: '171C19', beforePt: 10, afterPt: 3, headingLvl: HeadingLevel.HEADING_3 },
-        4: { pt: 11, color: '245C45', beforePt: 8, afterPt: 2, italic: true, headingLvl: HeadingLevel.HEADING_4 },
-        5: { pt: 10.5, color: '374151', beforePt: 6, afterPt: 2, headingLvl: HeadingLevel.HEADING_5 },
-        6: { pt: 10, color: '6B7280', beforePt: 6, afterPt: 2, headingLvl: HeadingLevel.HEADING_6 },
+        1: { pt: 20, color: '245C45', beforePt: 14, afterPt: 6, lh: 1.25, headingLvl: HeadingLevel.HEADING_1 },
+        2: { pt: 15, color: '398568', beforePt: 12, afterPt: 4, lh: 1.3, headingLvl: HeadingLevel.HEADING_2 },
+        3: { pt: 12.5, color: '171C19', beforePt: 10, afterPt: 3, lh: 1.35, headingLvl: HeadingLevel.HEADING_3 },
+        4: { pt: 11, color: '245C45', beforePt: 8, afterPt: 2, lh: 1.35, italic: true, headingLvl: HeadingLevel.HEADING_4 },
+        5: { pt: 10.5, color: '374151', beforePt: 6, afterPt: 2, lh: 1.35, headingLvl: HeadingLevel.HEADING_5 },
+        6: { pt: 10, color: '6B7280', beforePt: 6, afterPt: 2, lh: 1.35, headingLvl: HeadingLevel.HEADING_6 },
       };
       const spec = headingSpecs[level] || headingSpecs[1];
       const indentLvl = Number(attrs.indent || 0);
+      const effectiveBeforePt = collapseBeforePt(spec.beforePt);
+      const effectiveAfterPt = withNextBoxCollapse(spec.afterPt, attrs.marginBottom);
+      const lineBasePt = getMaxRunFontPt(node.content, spec.pt);
+      const spacingCfg = parseSpacingTwips(attrs, effectiveAfterPt, effectiveBeforePt, lineBasePt, spec.lh);
 
       blocks.push(
         new Paragraph({
           heading: spec.headingLvl,
+          pageBreakBefore,
           keepNext: true,
           alignment: mapAlignment(attrs.textAlign),
-          indent: indentLvl > 0 ? { left: indentLvl * 480 } : undefined,
-          spacing: parseSpacingTwips(attrs, spec.afterPt, spec.beforePt),
+          indent: indentLvl > 0 || extraIndent > 0 ? { left: indentLvl * 480 + extraIndent } : undefined,
+          border: bqBorder,
+          spacing: spacingCfg,
           children: buildInlineRuns(node.content, {
             fontSizePt: spec.pt,
             colorHex: spec.color,
             bold: true,
             italics: spec.italic,
+            fontFamily: baseFont,
           }),
         })
       );
+      prevAfterPt = effectiveAfterPt;
+      pendingTableAfterPt = 0;
       continue;
     }
 
     if (type === 'paragraph') {
       const indentLvl = Number(attrs.indent || 0);
-      const afterPt = options?.insideCell ? 2 : 6;
+      const baseAfterPt = options?.insideCell ? 0 : 6;
+      const cellAfterPt = withNextBoxCollapse(baseAfterPt, attrs.marginBottom);
+      const cellBeforePt = options?.insideCell
+        ? options?.cellParagraphSpacing && nodeIdx > 0
+          ? 2
+          : 0
+        : collapseBeforePt(0);
+      const defaultPt = options?.insideCell ? 10.5 : 11;
+      const defaultLh = options?.insideCell ? 1.35 : 1.38;
+      const lineBasePt = getMaxRunFontPt(node.content, defaultPt);
+
       blocks.push(
         new Paragraph({
+          pageBreakBefore,
           alignment: mapAlignment(attrs.textAlign),
-          indent: indentLvl > 0 ? { left: indentLvl * 480 } : undefined,
-          spacing: parseSpacingTwips(attrs, afterPt, 0),
+          indent: indentLvl > 0 || extraIndent > 0 ? { left: indentLvl * 480 + extraIndent } : undefined,
+          border: bqBorder,
+          spacing: parseSpacingTwips(attrs, cellAfterPt, cellBeforePt, lineBasePt, defaultLh),
           children: buildInlineRuns(node.content, {
-            fontSizePt: options?.insideCell ? 10.5 : 11,
+            fontSizePt: defaultPt,
             colorHex: baseColor,
+            bold: options?.isHeaderCell,
+            fontFamily: baseFont,
           }),
         })
       );
+      prevAfterPt = cellAfterPt;
+      pendingTableAfterPt = 0;
       continue;
     }
 
     if (type === 'bulletList' || type === 'orderedList' || type === 'taskList') {
-      const renderListItems = async (listNode: any, depth: number) => {
+      let pendingBreak = Boolean(pageBreakBefore);
+      let isVeryFirstListParagraph = true;
+      const listEndAfterPt = withNextBoxCollapse(6);
+      const renderListItems = async (listNode: any, depth: number, isRootList: boolean) => {
         const lType = listNode.type;
-        for (const li of listNode.content || []) {
+        let orderedRef: string | undefined;
+        if (lType === 'orderedList') {
+          const startNum = Math.max(1, Number(listNode.attrs?.start || 1));
+          orderedRef = `docium-ol-${numberingRegistry.length + 1}`;
+          numberingRegistry.push({ reference: orderedRef, start: startNum });
+        }
+
+        const items = listNode.content || [];
+        for (let liIdx = 0; liIdx < items.length; liIdx++) {
+          const li = items[liIdx];
           const checked = Boolean(li.attrs?.checked);
-          for (const child of li.content || []) {
+          const isLastRootLi = isRootList && liIdx === items.length - 1;
+          const liChildren = li.content || [];
+          for (let cIdx = 0; cIdx < liChildren.length; cIdx++) {
+            const child = liChildren[cIdx];
             if (child.type === 'bulletList' || child.type === 'orderedList' || child.type === 'taskList') {
-              await renderListItems(child, Math.min(8, depth + 1));
+              await renderListItems(child, Math.min(8, depth + 1), false);
             } else if (child.type === 'paragraph') {
+              const isFirst = pendingBreak;
+              pendingBreak = false;
+              const listBeforePt = isVeryFirstListParagraph ? collapseBeforePt(4) : 0;
+              isVeryFirstListParagraph = false;
+              const afterPt = isLastRootLi && cIdx === liChildren.length - 1 ? listEndAfterPt : 2;
+              const baseItemPt = options?.insideCell ? 10.5 : 11;
+              const lineItemPt = getMaxRunFontPt(child.content, baseItemPt);
               const runs = buildInlineRuns(child.content, {
-                fontSizePt: 11,
+                fontSizePt: baseItemPt,
                 colorHex: lType === 'taskList' && checked ? '6B7280' : baseColor,
+                bold: options?.isHeaderCell,
+                fontFamily: baseFont,
               });
               if (lType === 'taskList') {
                 const boxPrefix = new TextRun({
@@ -946,55 +1333,137 @@ async function convertNodesToDocxBlocks(
                 });
                 blocks.push(
                   new Paragraph({
-                    indent: { left: (depth + 1) * 360 },
-                    spacing: { before: 0, after: 60, line: 276 },
+                    pageBreakBefore: isFirst || undefined,
+                    indent: { left: (depth + 1) * 320 + extraIndent, hanging: 220 },
+                    border: bqBorder,
+                    spacing: parseSpacingTwips(child.attrs, afterPt, listBeforePt, lineItemPt, 1.38),
                     children: [boxPrefix, ...runs],
                   })
                 );
               } else {
                 blocks.push(
                   new Paragraph({
+                    pageBreakBefore: isFirst || undefined,
                     numbering:
-                      lType === 'orderedList'
-                        ? { reference: 'docium-numbered-list', level: depth }
+                      lType === 'orderedList' && orderedRef
+                        ? { reference: orderedRef, level: depth }
                         : undefined,
                     bullet: lType === 'bulletList' ? { level: depth } : undefined,
-                    spacing: { before: 0, after: 60, line: 276 },
+                    indent:
+                      lType === 'bulletList'
+                        ? { left: (depth + 1) * 360 + extraIndent, hanging: 220 }
+                        : extraIndent > 0
+                        ? { left: (depth + 1) * 360 + extraIndent, hanging: 240 }
+                        : undefined,
+                    border: bqBorder,
+                    spacing: parseSpacingTwips(child.attrs, afterPt, listBeforePt, lineItemPt, 1.38),
                     children: runs,
                   })
                 );
               }
+            } else {
+              const nestedBlocks = await convertNodesToDocxBlocks(
+                [child],
+                Math.max(400, printableWidthTwips - (depth + 1) * 360),
+                Math.max(120, printableWidthPx - (depth + 1) * 24),
+                {
+                  insideCell: options?.insideCell,
+                  isHeaderCell: options?.isHeaderCell,
+                  defaultColorHex: baseColor,
+                  defaultFontFamily: baseFont,
+                  numberingRegistry,
+                  blockquoteBorderColor: options?.blockquoteBorderColor,
+                  extraLeftIndentTwips: (depth + 1) * 360 + extraIndent,
+                }
+              );
+              blocks.push(...nestedBlocks);
             }
           }
         }
       };
-      await renderListItems(node, 0);
+      await renderListItems(node, 0, true);
+      prevAfterPt = listEndAfterPt;
+      pendingTableAfterPt = 0;
       continue;
     }
 
     if (type === 'blockquote') {
       const inner = node.content || [];
       const bColor = cleanHex(attrs.borderColor || '#245C45', '245C45');
-      for (const child of inner) {
-        blocks.push(
-          new Paragraph({
-            indent: { left: 360 },
-            border: {
-              left: { color: bColor, space: 10, style: BorderStyle.SINGLE, size: 18 },
-            },
-            spacing: { before: 80, after: 80, line: 276 },
-            children: buildInlineRuns(child.content, {
-              fontSizePt: 11,
-              colorHex: '4B5563',
-              italics: true,
-            }),
-          })
-        );
+      const quoteBorder = {
+        left: { color: bColor, space: 10, style: BorderStyle.SINGLE, size: 24 },
+      };
+      const quoteEndAfterPt = withNextBoxCollapse(8);
+
+      for (let qIdx = 0; qIdx < inner.length; qIdx++) {
+        const child = inner[qIdx];
+        const isFirstChild = qIdx === 0;
+        const isLastChild = qIdx === inner.length - 1;
+        const beforePt = isFirstChild ? collapseBeforePt(8) : 0;
+        const afterPt = isLastChild ? quoteEndAfterPt : 6;
+
+        if (child.type === 'paragraph' || !child.type) {
+          const linePt = getMaxRunFontPt(child.content, 11);
+          blocks.push(
+            new Paragraph({
+              pageBreakBefore: isFirstChild ? pageBreakBefore : undefined,
+              alignment: mapAlignment(child.attrs?.textAlign),
+              indent: { left: 260 },
+              border: quoteBorder,
+              spacing: parseSpacingTwips(child.attrs, afterPt, beforePt, linePt, 1.38),
+              children: buildInlineRuns(child.content, {
+                fontSizePt: 11,
+                colorHex: '4B5563',
+                italics: true,
+                fontFamily: baseFont,
+              }),
+            })
+          );
+        } else if (child.type === 'heading') {
+          const hLevel = Math.min(6, Math.max(1, Number(child.attrs?.level || 1)));
+          const hPt = [20, 15, 12.5, 11, 10.5, 10][hLevel - 1] || 12;
+          const hColor = hLevel === 1 ? '245C45' : hLevel === 2 ? '398568' : '4B5563';
+          const linePt = getMaxRunFontPt(child.content, hPt);
+          blocks.push(
+            new Paragraph({
+              pageBreakBefore: isFirstChild ? pageBreakBefore : undefined,
+              alignment: mapAlignment(child.attrs?.textAlign),
+              indent: { left: 260 },
+              border: quoteBorder,
+              spacing: parseSpacingTwips(child.attrs, afterPt, beforePt, linePt, 1.35),
+              children: buildInlineRuns(child.content, {
+                fontSizePt: hPt,
+                colorHex: hColor,
+                bold: true,
+                italics: true,
+                fontFamily: baseFont,
+              }),
+            })
+          );
+        } else {
+          const nestedBlocks = await convertNodesToDocxBlocks(
+            [child],
+            Math.max(400, printableWidthTwips - 260),
+            Math.max(120, printableWidthPx - 18),
+            {
+              insideCell: false,
+              defaultColorHex: '4B5563',
+              defaultFontFamily: baseFont,
+              numberingRegistry,
+              blockquoteBorderColor: bColor,
+              extraLeftIndentTwips: 260,
+            }
+          );
+          blocks.push(...nestedBlocks);
+        }
       }
+      prevAfterPt = quoteEndAfterPt;
+      pendingTableAfterPt = 0;
       continue;
     }
 
     if (type === 'callout') {
+      flushConsecutiveTableGap();
       const cType = String(attrs.type || 'info');
       const palettes: Record<string, { bg: string; border: string; text: string }> = {
         info: { bg: 'ECFDF5', border: '10B981', text: '064E3B' },
@@ -1006,22 +1475,23 @@ async function convertNodesToDocxBlocks(
       const pal = palettes[cType] || palettes.info;
       const innerParas = await convertNodesToDocxBlocks(
         node.content || [],
-        printableWidthTwips - 400,
+        printableWidthTwips - 480,
         printableWidthPx - 32,
-        { insideCell: true, defaultColorHex: pal.text }
+        { insideCell: true, defaultColorHex: pal.text, defaultFontFamily: baseFont }
       );
 
       blocks.push(
         new DocxTable({
           width: { size: printableWidthTwips, type: WidthType.DXA },
           columnWidths: [printableWidthTwips],
+          layout: TableLayoutType.FIXED,
           rows: [
             new DocxTableRow({
               children: [
                 new DocxTableCell({
                   width: { size: printableWidthTwips, type: WidthType.DXA },
                   shading: { type: ShadingType.CLEAR, color: 'auto', fill: pal.bg },
-                  margins: { top: 140, bottom: 140, left: 200, right: 180 },
+                  margins: { top: 160, bottom: 160, left: 240, right: 240 },
                   borders: {
                     left: { style: BorderStyle.SINGLE, size: 24, color: pal.border },
                     top: { style: BorderStyle.NONE, size: 0, color: 'FFFFFF' },
@@ -1035,25 +1505,48 @@ async function convertNodesToDocxBlocks(
           ],
         })
       );
-      blocks.push(new Paragraph({ spacing: { before: 0, after: 80 } }));
+      prevAfterPt = 0;
+      pendingTableAfterPt = 8;
       continue;
     }
 
     if (type === 'codeBlock') {
-      const codeText = (node.content || []).map((c: any) => c.text || '').join('');
-      const codeLines = codeText.split(/\r?\n/);
+      flushConsecutiveTableGap();
       const codeBgHex = cleanHex(attrs.backgroundColor || '#F4F6F4', 'F4F6F4');
       const codeTextHex = cleanHex(attrs.textColor || '#171C19', '171C19');
       const codeBorderHex = cleanHex(attrs.borderColor || '#DCE2DA', 'DCE2DA');
+
+      // Check if user applied an explicit fontFamily/fontSize mark on codeBlock text nodes
+      const textNodes = (node.content || []).filter((c: any) => c?.type === 'text' && typeof c.text === 'string');
+      let customCodeFont = 'Consolas';
+      let customCodePt = 9.5;
+      for (const tn of textNodes) {
+        for (const mk of tn.marks || []) {
+          if (mk?.type === 'fontFamily' && mk.attrs?.font) customCodeFont = primaryFontName(mk.attrs.font, customCodeFont);
+          if (mk?.type === 'textStyle' && mk.attrs?.fontFamily) customCodeFont = primaryFontName(mk.attrs.fontFamily, customCodeFont);
+          if (mk?.type === 'fontSize' && mk.attrs?.size) customCodePt = parsePtSize(mk.attrs.size, customCodePt);
+          if (mk?.type === 'textStyle' && mk.attrs?.fontSize) customCodePt = parsePtSize(mk.attrs.fontSize, customCodePt);
+        }
+      }
+
+      const codeText = textNodes.map((c: any) => c.text || '').join('');
+      const codeLines = codeText.split(/\r?\n/);
       const codeParas = codeLines.map(
-        (ln: string) =>
+        (ln: string, lineIdx: number) =>
           new Paragraph({
-            spacing: { before: 0, after: 20, line: 240 },
+            pageBreakBefore: lineIdx === 0 ? pageBreakBefore : undefined,
+            spacing: { before: 0, after: 20, line: Math.round(customCodePt * 1.45 * PT_TO_TWIPS), lineRule: LineRuleType.AT_LEAST },
             children: [
               new TextRun({
                 text: ln || ' ',
-                font: 'Consolas',
-                size: 19, // 9.5pt
+                font: {
+                  name: customCodeFont,
+                  ascii: customCodeFont,
+                  hAnsi: customCodeFont,
+                  cs: customCodeFont,
+                  eastAsia: customCodeFont,
+                },
+                size: Math.round(customCodePt * PT_TO_HALF_PT),
                 color: codeTextHex,
               }),
             ],
@@ -1064,6 +1557,7 @@ async function convertNodesToDocxBlocks(
         new DocxTable({
           width: { size: printableWidthTwips, type: WidthType.DXA },
           columnWidths: [printableWidthTwips],
+          layout: TableLayoutType.FIXED,
           rows: [
             new DocxTableRow({
               cantSplit: false,
@@ -1071,7 +1565,7 @@ async function convertNodesToDocxBlocks(
                 new DocxTableCell({
                   width: { size: printableWidthTwips, type: WidthType.DXA },
                   shading: { type: ShadingType.CLEAR, color: 'auto', fill: codeBgHex },
-                  margins: { top: 120, bottom: 120, left: 160, right: 160 },
+                  margins: { top: 160, bottom: 160, left: 200, right: 200 },
                   borders: {
                     top: { style: BorderStyle.SINGLE, size: 4, color: codeBorderHex },
                     bottom: { style: BorderStyle.SINGLE, size: 4, color: codeBorderHex },
@@ -1085,7 +1579,8 @@ async function convertNodesToDocxBlocks(
           ],
         })
       );
-      blocks.push(new Paragraph({ spacing: { before: 0, after: 80 } }));
+      prevAfterPt = 0;
+      pendingTableAfterPt = 8;
       continue;
     }
 
@@ -1252,7 +1747,7 @@ async function convertNodesToDocxBlocks(
     if (type === 'image') {
       const src = String(attrs.src || '');
       const wPx = Math.min(printableWidthPx, Math.max(60, Number(attrs.width || 420)));
-      const hPx = Math.max(40, Number(attrs.height || Math.round(wPx * 0.62)));
+      const hPx = attrs.height ? Math.max(24, Number(attrs.height)) : undefined;
       const alignMode = String(attrs.alignment || 'center');
       const caption = String(attrs.caption || '').trim();
 
@@ -1321,45 +1816,63 @@ async function convertNodesToDocxBlocks(
 
     // ==================== NATIVE ADJUSTABLE WORD TABLE ====================
     if (type === 'table') {
+      flushConsecutiveTableGap();
       const pmRows: any[] = node.content || [];
       if (pmRows.length === 0) continue;
 
-      // Determine logical column count and column widths (preserving user-resized Tiptap colwidth!)
+      // Determine logical column count and column widths (preserving user-resized colwidth OR measured DOM widths)
       let totalCols = 0;
-      const firstRowCells = pmRows[0]?.content || [];
-      const rawPxWidths: number[] = [];
+      const measuredDomCols: number[] | undefined = Array.isArray(attrs._measuredColWidthsPx)
+        ? attrs._measuredColWidthsPx
+        : undefined;
+      const colWidthsFromPm: number[] = [];
 
-      for (const c of firstRowCells) {
-        const span = Math.max(1, Number(c.attrs?.colspan || 1));
-        totalCols += span;
-        const cwArr = Array.isArray(c.attrs?.colwidth) ? c.attrs.colwidth : null;
-        for (let k = 0; k < span; k++) {
-          rawPxWidths.push(cwArr && cwArr[k] ? Number(cwArr[k]) : 0);
+      for (const r of pmRows) {
+        let rowCols = 0;
+        const rowPx: number[] = [];
+        for (const c of r?.content || []) {
+          const span = Math.max(1, Number(c.attrs?.colspan || 1));
+          rowCols += span;
+          const cwArr = Array.isArray(c.attrs?.colwidth) ? c.attrs.colwidth : null;
+          for (let k = 0; k < span; k++) {
+            rowPx.push(cwArr && cwArr[k] ? Number(cwArr[k]) : 0);
+          }
         }
+        if (rowCols > totalCols) totalCols = rowCols;
+        rowPx.forEach((w, idx) => {
+          if (w > 0 && !colWidthsFromPm[idx]) colWidthsFromPm[idx] = w;
+        });
       }
       totalCols = Math.max(1, totalCols);
 
       let colWidthsTwips: number[] = [];
-      const hasCustomWidths = rawPxWidths.some((w) => w > 0);
-      if (hasCustomWidths) {
+      const hasPmWidths = colWidthsFromPm.filter((w) => w > 0).length > 0;
+      if (hasPmWidths) {
         const defaultColPx = printableWidthPx / totalCols;
-        const filledPx = rawPxWidths.map((w) => (w > 0 ? w : defaultColPx));
+        const filledPx = Array.from({ length: totalCols }, (_, idx) => colWidthsFromPm[idx] || defaultColPx);
         const sumPx = filledPx.reduce((a, b) => a + b, 0) || printableWidthPx;
         colWidthsTwips = filledPx.map((px) => Math.max(360, Math.round((px / sumPx) * printableWidthTwips)));
+      } else if (measuredDomCols && measuredDomCols.length === totalCols) {
+        const sumPx = measuredDomCols.reduce((a, b) => a + b, 0) || printableWidthPx;
+        colWidthsTwips = measuredDomCols.map((px) => Math.max(360, Math.round((px / sumPx) * printableWidthTwips)));
       } else {
         const evenTwips = Math.floor(printableWidthTwips / totalCols);
         colWidthsTwips = Array(totalCols).fill(evenTwips);
       }
 
       const docxRows: DocxTableRow[] = [];
+      let allCellsBorderless = true;
+
       for (let rIdx = 0; rIdx < pmRows.length; rIdx++) {
         const rowNode = pmRows[rIdx];
         const cells = rowNode.content || [];
         const isHeaderRow = rIdx === 0 && cells.every((c: any) => c.type === 'tableHeader');
+        const rowPageBreak = Boolean(rowNode._pageBreakBefore) || (rIdx === 0 && Boolean(pageBreakBefore));
         const docxCells: DocxTableCell[] = [];
 
         let colCursor = 0;
-        for (const cellNode of cells) {
+        for (let cIdx = 0; cIdx < cells.length; cIdx++) {
+          const cellNode = cells[cIdx];
           const isTh = cellNode.type === 'tableHeader';
           const cAttrs = cellNode.attrs || {};
           const colSpan = Math.max(1, Number(cAttrs.colspan || 1));
@@ -1377,11 +1890,17 @@ async function convertNodesToDocxBlocks(
             ? 'F1F5F3'
             : undefined;
 
-          // If cell has dark background (like Forest/Executive preset header), ensure default text is white
           const isDarkBg =
             bgHex === '245C45' || bgHex === '1E293B' || bgHex === '171C19' || bgHex === '1E3A8A';
 
+          const defaultCellTextHex = cAttrs.textColor
+            ? cleanHex(cAttrs.textColor, isDarkBg ? 'FFFFFF' : '171C19')
+            : isDarkBg
+            ? 'FFFFFF'
+            : '171C19';
+
           const bStyleAttr = cAttrs.borderStyle || 'solid';
+          if (bStyleAttr !== 'none') allCellsBorderless = false;
           const bColorHex = cleanHex(cAttrs.borderColor || '#CBD5E1', 'CBD5E1');
           const docxBorderStyle =
             bStyleAttr === 'none'
@@ -1391,7 +1910,7 @@ async function convertNodesToDocxBlocks(
               : BorderStyle.SINGLE;
           const borderEntry = {
             style: docxBorderStyle,
-            size: bStyleAttr === 'none' ? 0 : 4,
+            size: bStyleAttr === 'none' ? 0 : 6,
             color: bColorHex,
           };
 
@@ -1402,32 +1921,30 @@ async function convertNodesToDocxBlocks(
               ? VerticalAlign.BOTTOM
               : VerticalAlign.TOP;
 
+          const rawCellNodes = cellNode.content || [];
+          const cellBlocksInput =
+            rowPageBreak && cIdx === 0 && rawCellNodes.length > 0
+              ? [{ ...rawCellNodes[0], _pageBreakBefore: true }, ...rawCellNodes.slice(1)]
+              : rawCellNodes;
+
           const cellChildren = await convertNodesToDocxBlocks(
-            cellNode.content || [],
-            Math.max(400, cellWidthTwips - 220),
-            Math.max(60, Math.round((cellWidthTwips / printableWidthTwips) * printableWidthPx) - 16),
+            cellBlocksInput,
+            Math.max(400, cellWidthTwips - 280),
+            Math.max(60, Math.round((cellWidthTwips / printableWidthTwips) * printableWidthPx) - 20),
             {
               insideCell: true,
-              defaultColorHex: isDarkBg ? 'FFFFFF' : '171C19',
+              isHeaderCell: isTh,
+              defaultColorHex: defaultCellTextHex,
+              defaultFontFamily: baseFont,
+              numberingRegistry,
+              cellParagraphSpacing: true,
             }
           );
 
-          // Bold header cells if not already styled
-          const finalCellChildren =
-            isTh && cellNode.content
-              ? (cellNode.content as any[]).map(
-                  (pNode: any) =>
-                    new Paragraph({
-                      alignment: mapAlignment(pNode.attrs?.textAlign),
-                      spacing: { before: 0, after: 40, line: 260 },
-                      children: buildInlineRuns(pNode.content, {
-                        fontSizePt: 10.5,
-                        colorHex: isDarkBg ? 'FFFFFF' : '171C19',
-                        bold: true,
-                      }),
-                    })
-                )
-              : cellChildren;
+          const finalCellChildren: (Paragraph | DocxTable)[] =
+            cellChildren.length > 0
+              ? cellChildren
+              : [new Paragraph({ pageBreakBefore: rowPageBreak && cIdx === 0 ? true : undefined, children: [] })];
 
           docxCells.push(
             new DocxTableCell({
@@ -1443,7 +1960,7 @@ async function convertNodesToDocxBlocks(
                 left: borderEntry,
                 right: borderEntry,
               },
-              children: finalCellChildren.length > 0 ? finalCellChildren : [new Paragraph('')],
+              children: finalCellChildren,
             })
           );
         }
@@ -1461,23 +1978,43 @@ async function convertNodesToDocxBlocks(
         new DocxTable({
           width: { size: printableWidthTwips, type: WidthType.DXA },
           columnWidths: colWidthsTwips,
-          layout: TableLayoutType.AUTOFIT,
+          layout: TableLayoutType.FIXED,
+          borders: allCellsBorderless
+            ? {
+                top: { style: BorderStyle.NONE, size: 0, color: 'FFFFFF' },
+                bottom: { style: BorderStyle.NONE, size: 0, color: 'FFFFFF' },
+                left: { style: BorderStyle.NONE, size: 0, color: 'FFFFFF' },
+                right: { style: BorderStyle.NONE, size: 0, color: 'FFFFFF' },
+                insideHorizontal: { style: BorderStyle.NONE, size: 0, color: 'FFFFFF' },
+                insideVertical: { style: BorderStyle.NONE, size: 0, color: 'FFFFFF' },
+              }
+            : undefined,
           rows: docxRows,
         })
       );
-      blocks.push(new Paragraph({ spacing: { before: 0, after: 80 } }));
+      prevAfterPt = 0;
+      pendingTableAfterPt = 8;
     }
   }
 
   return blocks;
 }
 
-function buildHeaderParagraph(rawText: string, watermarkText?: string): Paragraph[] {
+function buildHeaderParagraph(
+  rawText: string,
+  options?: {
+    watermarkText?: string;
+    align?: 'left' | 'center' | 'right';
+    showLine?: boolean;
+    fontFamily?: string;
+  }
+): Paragraph[] {
+  const hdrFont = options?.fontFamily || 'Calibri';
   const runs: any[] = [];
-  if (watermarkText && watermarkText.trim()) {
+  if (options?.watermarkText && options.watermarkText.trim()) {
     runs.push(
       new TextWatermark({
-        text: watermarkText.trim(),
+        text: options.watermarkText.trim(),
         color: '245C45',
         opacity: 0.14,
         bold: true,
@@ -1485,56 +2022,156 @@ function buildHeaderParagraph(rawText: string, watermarkText?: string): Paragrap
     );
   }
 
-  if (rawText && rawText.trim()) {
+  const trimmed = (rawText || '').trim();
+  if (rawText && trimmed) {
     const parts = rawText.split(/(\{page\}|\{pages\})/gi);
     for (const part of parts) {
       if (/^\{page\}$/i.test(part)) {
-        runs.push(new TextRun({ children: [PageNumber.CURRENT], font: 'Calibri', size: 19, color: '6B7280' }));
+        runs.push(new TextRun({ children: [PageNumber.CURRENT], font: hdrFont, size: 19, color: '6B7280' }));
       } else if (/^\{pages\}$/i.test(part)) {
-        runs.push(new TextRun({ children: [PageNumber.TOTAL_PAGES], font: 'Calibri', size: 19, color: '6B7280' }));
+        runs.push(new TextRun({ children: [PageNumber.TOTAL_PAGES], font: hdrFont, size: 19, color: '6B7280' }));
       } else if (part) {
-        runs.push(new TextRun({ text: part, font: 'Calibri', size: 19, color: '6B7280' }));
+        for (const seg of splitTextPreservingEmojis(part)) {
+          runs.push(
+            new TextRun({
+              text: seg.text,
+              font: seg.isEmoji ? 'Segoe UI Emoji' : hdrFont,
+              size: 19,
+              color: '6B7280',
+            })
+          );
+        }
       }
     }
   }
 
-  return [new Paragraph({ children: runs })];
+  const drawLine = Boolean(options?.showLine) && trimmed.length > 0;
+  return [
+    new Paragraph({
+      alignment: mapAlignment(options?.align),
+      spacing: { before: 0, after: 0, line: 220, lineRule: LineRuleType.AUTO },
+      border: drawLine
+        ? {
+            bottom: {
+              color: 'D1D5DB',
+              space: 4,
+              style: BorderStyle.SINGLE,
+              size: 4,
+            },
+          }
+        : undefined,
+      children: runs,
+    }),
+  ];
 }
 
-function buildFooterParagraph(rawText: string, showPageNumbers: boolean): Paragraph[] {
+function buildFooterParagraph(
+  rawText: string,
+  showPageNumbers: boolean,
+  options?: {
+    align?: 'left' | 'center' | 'right';
+    showLine?: boolean;
+    pageNumberPosition?: 'bottom-center' | 'bottom-right' | 'top-right';
+    fontFamily?: string;
+  }
+): Paragraph[] {
+  const ftrFont = options?.fontFamily || 'Calibri';
   const runs: TextRun[] = [];
   const hasExplicitToken = /\{page\}/i.test(rawText || '');
+  const trimmed = (rawText || '').trim();
 
-  if (rawText && rawText.trim()) {
+  if (rawText && trimmed) {
     const parts = rawText.split(/(\{page\}|\{pages\})/gi);
     for (const part of parts) {
       if (/^\{page\}$/i.test(part)) {
-        runs.push(new TextRun({ children: [PageNumber.CURRENT], font: 'Calibri', size: 19, color: '6B7280' }));
+        runs.push(new TextRun({ children: [PageNumber.CURRENT], font: ftrFont, size: 19, color: '6B7280' }));
       } else if (/^\{pages\}$/i.test(part)) {
-        runs.push(new TextRun({ children: [PageNumber.TOTAL_PAGES], font: 'Calibri', size: 19, color: '6B7280' }));
+        runs.push(new TextRun({ children: [PageNumber.TOTAL_PAGES], font: ftrFont, size: 19, color: '6B7280' }));
       } else if (part) {
-        runs.push(new TextRun({ text: part, font: 'Calibri', size: 19, color: '6B7280' }));
+        for (const seg of splitTextPreservingEmojis(part)) {
+          runs.push(
+            new TextRun({
+              text: seg.text,
+              font: seg.isEmoji ? 'Segoe UI Emoji' : ftrFont,
+              size: 19,
+              color: '6B7280',
+            })
+          );
+        }
       }
     }
   }
 
   if (showPageNumbers && !hasExplicitToken) {
     if (runs.length > 0) {
-      runs.push(new TextRun({ text: '   •   Page ', font: 'Calibri', size: 19, color: '6B7280' }));
+      runs.push(new TextRun({ text: '   •   Page ', font: ftrFont, size: 19, color: '6B7280' }));
     } else {
-      runs.push(new TextRun({ text: 'Page ', font: 'Calibri', size: 19, color: '6B7280' }));
+      runs.push(new TextRun({ text: 'Page ', font: ftrFont, size: 19, color: '6B7280' }));
     }
-    runs.push(new TextRun({ children: [PageNumber.CURRENT], font: 'Calibri', size: 19, color: '6B7280' }));
-    runs.push(new TextRun({ text: ' of ', font: 'Calibri', size: 19, color: '6B7280' }));
-    runs.push(new TextRun({ children: [PageNumber.TOTAL_PAGES], font: 'Calibri', size: 19, color: '6B7280' }));
+    runs.push(new TextRun({ children: [PageNumber.CURRENT], font: ftrFont, size: 19, color: '6B7280' }));
+    runs.push(new TextRun({ text: ' of ', font: ftrFont, size: 19, color: '6B7280' }));
+    runs.push(new TextRun({ children: [PageNumber.TOTAL_PAGES], font: ftrFont, size: 19, color: '6B7280' }));
   }
+
+  const drawLine = Boolean(options?.showLine) && (trimmed.length > 0 || showPageNumbers);
+  const resolvedAlign =
+    showPageNumbers && !trimmed
+      ? options?.pageNumberPosition === 'bottom-center'
+        ? AlignmentType.CENTER
+        : AlignmentType.RIGHT
+      : mapAlignment(options?.align);
 
   return [
     new Paragraph({
-      alignment: showPageNumbers && !rawText?.trim() ? AlignmentType.RIGHT : AlignmentType.LEFT,
+      alignment: resolvedAlign,
+      spacing: { before: 0, after: 0, line: 220, lineRule: LineRuleType.AUTO },
+      border: drawLine
+        ? {
+            top: {
+              color: 'D1D5DB',
+              space: 4,
+              style: BorderStyle.SINGLE,
+              size: 4,
+            },
+          }
+        : undefined,
       children: runs,
     }),
   ];
+}
+
+function collectDocumentFonts(nodes: any[]): { dominantFont: string; allFonts: Set<string> } {
+  const counts = new Map<string, number>();
+  const allFonts = new Set<string>();
+
+  const walk = (arr: any[]) => {
+    for (const node of arr) {
+      if (!node) continue;
+      if (node.type === 'text' && Array.isArray(node.marks)) {
+        let f = '';
+        for (const m of node.marks) {
+          if (m?.type === 'fontFamily' && m.attrs?.font) f = primaryFontName(m.attrs.font, '');
+          else if (m?.type === 'textStyle' && m.attrs?.fontFamily) f = primaryFontName(m.attrs.fontFamily, '');
+        }
+        if (f) {
+          allFonts.add(f);
+          counts.set(f, (counts.get(f) || 0) + (node.text?.length || 1));
+        }
+      }
+      if (Array.isArray(node.content)) walk(node.content);
+    }
+  };
+  walk(nodes || []);
+
+  let dominantFont = 'Calibri';
+  let maxCount = 0;
+  for (const [f, count] of counts.entries()) {
+    if (count > maxCount) {
+      maxCount = count;
+      dominantFont = f;
+    }
+  }
+  return { dominantFont, allFonts };
 }
 
 export async function exportToDocx(
@@ -1562,41 +2199,97 @@ export async function exportToDocx(
   const printableWidthPx = Math.max(240, Math.round((pageWidthMm - resolvedMargins.left - resolvedMargins.right) * 3.779527559));
 
   const docJson = options?.jsonContent || parseHtmlFallbackToJson(htmlContent || '<p></p>');
+  const { allFonts } = collectDocumentFonts(docJson.content || []);
+  const domDefaultFont =
+    typeof document !== 'undefined' && typeof document.querySelector === 'function'
+      ? (() => {
+          const tt = document.querySelector('#docium-paginated-sheet .tiptap, .tiptap') as HTMLElement | null;
+          return tt ? normalizeExportFontName(window.getComputedStyle(tt).fontFamily, 'Calibri') : 'Calibri';
+        })()
+      : 'Calibri';
+  const baseFont = options?.defaultFontFamily
+    ? primaryFontName(options.defaultFontFamily, domDefaultFont)
+    : domDefaultFont;
+
+  const numberingRegistry: NumberingRegistryItem[] = [];
   const bodyChildren = await convertNodesToDocxBlocks(
     docJson.content || [],
     printableWidthTwips,
-    printableWidthPx
+    printableWidthPx,
+    {
+      isTopLevel: true,
+      defaultFontFamily: baseFont,
+      numberingRegistry,
+    }
   );
 
+  // Embed non-standard / Google / Office CloudFont TrueType fonts used in document directly into .docx archive when available in browser
+  const STANDARD_DESKTOP_FONTS = new Set([
+    'calibri', 'calibri light', 'arial', 'arial black',
+    'times new roman', 'georgia', 'cambria', 'cambria math', 'consolas',
+    'verdana', 'tahoma', 'courier new', 'segoe ui', 'trebuchet ms',
+    'candara', 'constantia', 'corbel', 'palatino linotype', 'impact', 'comic sans ms',
+    'lucida console', 'franklin gothic medium', 'cascadia mono', 'cascadia code',
+  ]);
+  const embeddedDocxFonts: Array<{ name: string; data: Buffer; bold?: Buffer; italic?: Buffer; boldItalic?: Buffer }> = [];
+  if (typeof window !== 'undefined' && allFonts.size > 0) {
+    const candidateFonts = Array.from(allFonts)
+      .filter((f) => !STANDARD_DESKTOP_FONTS.has(f.toLowerCase()))
+      .slice(0, 12);
+    await Promise.all(
+      candidateFonts.map(async (fontName) => {
+        const [regBytes, boldBytes, italicBytes, boldItalicBytes] = await Promise.all([
+          fetchTrueTypeFontBytes(fontName, false, false, false),
+          fetchTrueTypeFontBytes(fontName, true, false, false),
+          fetchTrueTypeFontBytes(fontName, false, true, false),
+          fetchTrueTypeFontBytes(fontName, true, true, false),
+        ]);
+        if (!regBytes) return;
+        embeddedDocxFonts.push({
+          name: fontName,
+          data: regBytes as unknown as Buffer,
+          ...(boldBytes ? { bold: boldBytes as unknown as Buffer } : {}),
+          ...(italicBytes ? { italic: italicBytes as unknown as Buffer } : {}),
+          ...(boldItalicBytes ? { boldItalic: boldItalicBytes as unknown as Buffer } : {}),
+        });
+      })
+    );
+  }
+
   const pb = options?.pageBorder || 'none';
+  const pbColor = cleanHex(options?.pageBorderColor, pb === 'accent' ? '245C45' : '374151');
+  const pbSize = Math.max(4, Math.round((options?.pageBorderWidth || (pb === 'accent' ? 1.5 : 1)) * 8));
+  const pbOffsetFrom = options?.pageBorderOffset === 'margin' ? 'text' : 'page';
   const pageBordersConfig =
     pb !== 'none'
       ? {
-          pageBorders: {
-            display: 'allPages' as any,
-            offsetFrom: 'page' as any,
+          borders: {
+            pageBorders: {
+              display: 'allPages' as any,
+              offsetFrom: pbOffsetFrom as any,
+            },
             pageBorderTop: {
               style: pb === 'double' ? BorderStyle.DOUBLE : BorderStyle.SINGLE,
-              size: pb === 'accent' ? 12 : 8,
-              color: pb === 'accent' ? '245C45' : '374151',
+              size: pbSize,
+              color: pbColor,
               space: 24,
             },
             pageBorderBottom: {
               style: pb === 'double' ? BorderStyle.DOUBLE : BorderStyle.SINGLE,
-              size: pb === 'accent' ? 12 : 8,
-              color: pb === 'accent' ? '245C45' : '374151',
+              size: pbSize,
+              color: pbColor,
               space: 24,
             },
             pageBorderLeft: {
               style: pb === 'double' ? BorderStyle.DOUBLE : BorderStyle.SINGLE,
-              size: pb === 'accent' ? 12 : 8,
-              color: pb === 'accent' ? '245C45' : '374151',
+              size: pbSize,
+              color: pbColor,
               space: 24,
             },
             pageBorderRight: {
               style: pb === 'double' ? BorderStyle.DOUBLE : BorderStyle.SINGLE,
-              size: pb === 'accent' ? 12 : 8,
-              color: pb === 'accent' ? '245C45' : '374151',
+              size: pbSize,
+              color: pbColor,
               space: 24,
             },
           },
@@ -1607,9 +2300,35 @@ export async function exportToDocx(
   const hasHeader = Boolean(options?.headerText?.trim() || options?.firstPageHeaderText?.trim() || hasWatermark);
   const hasFooter = Boolean(options?.footerText?.trim() || options?.firstPageFooterText?.trim() || options?.showPageNumbers);
 
+  const buildOrderedLevels = (startNum = 1) => [
+    {
+      level: 0,
+      format: LevelFormat.DECIMAL,
+      text: '%1.',
+      alignment: AlignmentType.START,
+      start: startNum,
+      style: { paragraph: { indent: { left: 360, hanging: 240 } }, run: { font: baseFont } },
+    },
+    {
+      level: 1,
+      format: LevelFormat.LOWER_LETTER,
+      text: '%2.',
+      alignment: AlignmentType.START,
+      style: { paragraph: { indent: { left: 720, hanging: 240 } }, run: { font: baseFont } },
+    },
+    {
+      level: 2,
+      format: LevelFormat.LOWER_ROMAN,
+      text: '%3.',
+      alignment: AlignmentType.START,
+      style: { paragraph: { indent: { left: 1080, hanging: 240 } }, run: { font: baseFont } },
+    },
+  ];
+
   const wordDoc = new Document({
     title: cleanTitle,
     creator: 'Docium Workspace',
+    fonts: embeddedDocxFonts.length > 0 ? embeddedDocxFonts : undefined,
     background:
       options?.pageColor && options.pageColor.toUpperCase() !== '#FFFFFF'
         ? { color: cleanHex(options.pageColor, 'FFFFFF') }
@@ -1618,44 +2337,81 @@ export async function exportToDocx(
       default: {
         document: {
           run: {
-            font: 'Calibri',
+            font: {
+              name: baseFont,
+              ascii: baseFont,
+              hAnsi: baseFont,
+              cs: baseFont,
+              eastAsia: baseFont,
+            },
             size: 22, // 11pt
             color: '171C19',
           },
           paragraph: {
-            spacing: { line: 276, after: 120 },
+            spacing: { line: 304, lineRule: LineRuleType.AT_LEAST, after: 120 },
           },
         },
       },
+      paragraphStyles: [
+        {
+          id: 'Normal',
+          name: 'Normal',
+          run: { font: baseFont, size: 22, color: '171C19' },
+        },
+        {
+          id: 'Heading1',
+          name: 'Heading 1',
+          basedOn: 'Normal',
+          next: 'Normal',
+          run: { font: baseFont, size: 40, bold: true, color: '245C45' },
+        },
+        {
+          id: 'Heading2',
+          name: 'Heading 2',
+          basedOn: 'Normal',
+          next: 'Normal',
+          run: { font: baseFont, size: 30, bold: true, color: '398568' },
+        },
+        {
+          id: 'Heading3',
+          name: 'Heading 3',
+          basedOn: 'Normal',
+          next: 'Normal',
+          run: { font: baseFont, size: 25, bold: true, color: '171C19' },
+        },
+        {
+          id: 'Heading4',
+          name: 'Heading 4',
+          basedOn: 'Normal',
+          next: 'Normal',
+          run: { font: baseFont, size: 22, bold: true, italics: true, color: '245C45' },
+        },
+        {
+          id: 'Heading5',
+          name: 'Heading 5',
+          basedOn: 'Normal',
+          next: 'Normal',
+          run: { font: baseFont, size: 21, bold: true, color: '374151' },
+        },
+        {
+          id: 'Heading6',
+          name: 'Heading 6',
+          basedOn: 'Normal',
+          next: 'Normal',
+          run: { font: baseFont, size: 20, bold: true, color: '6B7280' },
+        },
+      ],
     },
     numbering: {
       config: [
         {
           reference: 'docium-numbered-list',
-          levels: [
-            {
-              level: 0,
-              format: LevelFormat.DECIMAL,
-              text: '%1.',
-              alignment: AlignmentType.START,
-              style: { paragraph: { indent: { left: 720, hanging: 360 } } },
-            },
-            {
-              level: 1,
-              format: LevelFormat.LOWER_LETTER,
-              text: '%2.',
-              alignment: AlignmentType.START,
-              style: { paragraph: { indent: { left: 1440, hanging: 360 } } },
-            },
-            {
-              level: 2,
-              format: LevelFormat.LOWER_ROMAN,
-              text: '%3.',
-              alignment: AlignmentType.START,
-              style: { paragraph: { indent: { left: 2160, hanging: 360 } } },
-            },
-          ],
+          levels: buildOrderedLevels(1),
         },
+        ...numberingRegistry.map((item) => ({
+          reference: item.reference,
+          levels: buildOrderedLevels(item.start),
+        })),
       ],
     },
     sections: [
@@ -1677,8 +2433,8 @@ export async function exportToDocx(
               bottom: marginBottomTwips,
               left: marginLeftTwips,
               right: marginRightTwips,
-              header: Math.min(720, Math.round(marginTopTwips * 0.5)),
-              footer: Math.min(720, Math.round(marginBottomTwips * 0.5)),
+              header: Math.min(720, Math.round(marginTopTwips * 0.45)),
+              footer: Math.min(720, Math.round(marginBottomTwips * 0.45)),
             },
             ...pageBordersConfig,
           },
@@ -1686,12 +2442,22 @@ export async function exportToDocx(
         headers: hasHeader
           ? {
               default: new Header({
-                children: buildHeaderParagraph(options?.headerText || '', options?.watermarkText),
+                children: buildHeaderParagraph(options?.headerText || '', {
+                  watermarkText: options?.watermarkText,
+                  align: options?.headerAlign,
+                  showLine: Boolean(options?.showHeaderLine),
+                  fontFamily: baseFont,
+                }),
               }),
               ...(options?.differentFirstPage
                 ? {
                     first: new Header({
-                      children: buildHeaderParagraph(options?.firstPageHeaderText || '', options?.watermarkText),
+                      children: buildHeaderParagraph(options?.firstPageHeaderText || '', {
+                        watermarkText: options?.watermarkText,
+                        align: options?.headerAlign,
+                        showLine: Boolean(options?.showHeaderLine),
+                        fontFamily: baseFont,
+                      }),
                     }),
                   }
                 : {}),
@@ -1700,12 +2466,26 @@ export async function exportToDocx(
         footers: hasFooter
           ? {
               default: new Footer({
-                children: buildFooterParagraph(options?.footerText || '', Boolean(options?.showPageNumbers)),
+                children: buildFooterParagraph(options?.footerText || '', Boolean(options?.showPageNumbers), {
+                  align: options?.footerAlign,
+                  showLine: Boolean(options?.showFooterLine),
+                  pageNumberPosition: options?.pageNumberPosition,
+                  fontFamily: baseFont,
+                }),
               }),
               ...(options?.differentFirstPage
                 ? {
                     first: new Footer({
-                      children: buildFooterParagraph(options?.firstPageFooterText || '', false),
+                      children: buildFooterParagraph(
+                        options?.firstPageFooterText || '',
+                        Boolean(options?.showPageNumbers),
+                        {
+                          align: options?.footerAlign,
+                          showLine: Boolean(options?.showFooterLine),
+                          pageNumberPosition: options?.pageNumberPosition,
+                          fontFamily: baseFont,
+                        }
+                      ),
                     }),
                   }
                 : {}),

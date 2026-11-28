@@ -101,7 +101,7 @@ export function WorkspaceClient({ itemId }: WorkspaceClientProps) {
   }
 
   return (
-    <div className="h-screen w-screen overflow-hidden flex flex-col bg-[var(--background)] text-[var(--text)]">
+    <div className="docium-workspace-shell h-screen w-screen overflow-hidden flex flex-col bg-[var(--background)] text-[var(--text)]">
       {item.type === 'doc' && (
         <DocumentEditor documentId={itemId} showBackToHome={true} />
       )}

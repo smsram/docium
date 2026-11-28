@@ -812,13 +812,26 @@ export class StreamingSessionManager {
     // Safely signal lifecycle cancellation and stream drain without premature releaseLock
     session.lifecycle.cancel('User clicked stop');
 
+    // Finalize any running steps so UI never leaves stale spinners after stopping
+    session.activityEvents = session.activityEvents.map((evt) =>
+      evt.status === 'running'
+        ? {
+            ...evt,
+            status: 'completed' as const,
+            safeSummary: evt.safeSummary || 'Stopped',
+          }
+        : evt
+    );
+
     session.status = 'cancelled';
     const result = {
       content: session.content,
-      activityEvents: session.activityEvents,
+      activityEvents: [...session.activityEvents],
       status: 'cancelled' as const,
     };
 
+    // Push final cancelled snapshot while session still exists, then clear active session
+    this.updateSnapshot(conversationId);
     this.sessions.delete(conversationId);
     chatDiagnostics.setActiveStreamCount(this.sessions.size);
     this.updateSnapshot(conversationId);

@@ -50,6 +50,7 @@ interface ChatComposerProps {
   currentModelId?: string;
   onSelectModel?: (providerId: ProviderId, modelId: string) => void;
   workspaceId?: string;
+  workspaceSources?: Array<{ id: string; title: string; type: string; fileSize?: string }>;
   onMentionSelect?: (source: { id: string; title: string; type: string; size?: string }) => void;
 }
 
@@ -69,6 +70,7 @@ export function ChatComposer({
   currentModelId,
   onSelectModel,
   workspaceId,
+  workspaceSources,
   onMentionSelect,
 }: ChatComposerProps) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -85,71 +87,54 @@ export function ChatComposer({
   const [autocompleteQuery, setAutocompleteQuery] = useState('');
   const [highlightedIndex, setHighlightedIndex] = useState(0);
 
-  const { getDocumentSources, documents, sheets, slides, pdfs, sources } = useWorkspaceStore();
+  const { getDocumentSources, sources, getActiveConversation } = useWorkspaceStore();
 
-  // Aggregate candidate sources exclusively belonging to the active workspace
+  // Strictly aggregate ONLY document sources belonging to the current workspace
   const candidateSources = useMemo(() => {
     const list: Array<{ id: string; title: string; type: string; size?: string }> = [];
     const seen = new Set<string>();
+    const DOCUMENT_SOURCE_TYPES = new Set(['pdf', 'docx', 'xlsx', 'pptx', 'txt', 'md', 'note', 'image']);
 
-    // 1. Files currently attached to conversation
-    for (const a of attachments) {
-      if (!seen.has(a.name.toLowerCase())) {
-        seen.add(a.name.toLowerCase());
-        list.push({ id: a.id, title: a.name, type: a.type, size: a.size });
+    const pushIfDocSource = (src: { id: string; title: string; type: string; size?: string }) => {
+      const normalizedType = (src.type || '').toLowerCase();
+      if (normalizedType === 'url') return;
+      if (normalizedType && !DOCUMENT_SOURCE_TYPES.has(normalizedType) && !normalizedType.startsWith('image/')) {
+        // Still allow common document MIME fallbacks if any
+        if (!/(pdf|word|document|sheet|presentation|text|markdown|csv)/i.test(normalizedType)) {
+          return;
+        }
       }
+      const key = src.id || src.title.toLowerCase();
+      const titleKey = src.title.toLowerCase();
+      if (!seen.has(key) && !seen.has(titleKey)) {
+        seen.add(key);
+        seen.add(titleKey);
+        list.push(src);
+      }
+    };
+
+    const currentConv = workspaceId ? getActiveConversation(workspaceId) : undefined;
+    for (const s of currentConv?.sources || []) {
+      pushIfDocSource({ id: s.id, title: s.title, type: s.type, size: s.fileSize });
     }
 
-    // 2. Sources belonging to the active workspace first, then any other workspace sources
+    for (const s of workspaceSources || []) {
+      pushIfDocSource({ id: s.id, title: s.title, type: s.type, size: s.fileSize });
+    }
+
     const currentWorkspaceSources = workspaceId ? getDocumentSources(workspaceId) : [];
     for (const s of currentWorkspaceSources) {
-      if (!seen.has(s.title.toLowerCase())) {
-        seen.add(s.title.toLowerCase());
-        list.push({ id: s.id, title: s.title, type: s.type, size: s.fileSize });
-      }
+      pushIfDocSource({ id: s.id, title: s.title, type: s.type, size: s.fileSize });
     }
 
     for (const s of sources) {
-      if (s.workspaceId === workspaceId && !seen.has(s.title.toLowerCase())) {
-        seen.add(s.title.toLowerCase());
-        list.push({ id: s.id, title: s.title, type: s.type, size: s.fileSize });
-      }
-    }
-    for (const s of sources) {
-      if (!seen.has(s.title.toLowerCase())) {
-        seen.add(s.title.toLowerCase());
-        list.push({ id: s.id, title: s.title, type: s.type, size: s.fileSize });
-      }
-    }
-
-    // 3. Workspace files (active file + other docs, sheets, slides, pdfs in workspace)
-    for (const d of documents) {
-      if (!seen.has(`${d.title}.docx`.toLowerCase())) {
-        seen.add(`${d.title}.docx`.toLowerCase());
-        list.push({ id: d.id, title: `${d.title}.docx`, type: 'docx', size: d.size });
-      }
-    }
-    for (const p of pdfs) {
-      if (!seen.has(`${p.title}.pdf`.toLowerCase())) {
-        seen.add(`${p.title}.pdf`.toLowerCase());
-        list.push({ id: p.id, title: `${p.title}.pdf`, type: 'pdf', size: p.size });
-      }
-    }
-    for (const sh of sheets) {
-      if (!seen.has(`${sh.title}.xlsx`.toLowerCase())) {
-        seen.add(`${sh.title}.xlsx`.toLowerCase());
-        list.push({ id: sh.id, title: `${sh.title}.xlsx`, type: 'xlsx' });
-      }
-    }
-    for (const sl of slides) {
-      if (!seen.has(`${sl.title}.pptx`.toLowerCase())) {
-        seen.add(`${sl.title}.pptx`.toLowerCase());
-        list.push({ id: sl.id, title: `${sl.title}.pptx`, type: 'pptx' });
+      if (workspaceId && s.workspaceId === workspaceId) {
+        pushIfDocSource({ id: s.id, title: s.title, type: s.type, size: s.fileSize });
       }
     }
 
     return list;
-  }, [attachments, workspaceId, getDocumentSources, sources, documents, sheets, slides, pdfs]);
+  }, [workspaceId, workspaceSources, getDocumentSources, getActiveConversation, sources]);
 
   // Filter sources matching typed @attach query
   const filteredSources = useMemo(() => {
@@ -174,8 +159,8 @@ export function ChatComposer({
     const cursor = textareaRef.current ? textareaRef.current.selectionStart : val.length;
     const textBefore = val.slice(0, cursor);
 
-    // Trigger autocomplete on @attach or @
-    const match = textBefore.match(/(?:@attach\s*\(?"?|@)([a-zA-Z0-9_\-\.\s]*)$/i);
+    // Trigger autocomplete only when @ starts at beginning or after whitespace (never inside email addresses)
+    const match = textBefore.match(/(?:^|\s)(?:@attach\s*\(?"?|@)([a-zA-Z0-9_\-\.\s()]*)$/i);
     if (match) {
       setAutocompleteQuery(match[1] || '');
       setAutocompleteOpen(true);
@@ -193,12 +178,16 @@ export function ChatComposer({
       const textAfter = val.slice(cursor);
 
       // Check if user specifically typed @attach or just @
-      const isAttachSyntax = /@attach\s*\(?"?([a-zA-Z0-9_\-\.\s]*)$/i.test(textBefore);
-      const replacementToken = isAttachSyntax ? `@attach("${src.title}") ` : `@${src.title} `;
+      const isAttachSyntax = /(?:^|\s)@attach\s*\(?"?([a-zA-Z0-9_\-\.\s()]*)$/i.test(textBefore);
+      const replacementToken = isAttachSyntax
+        ? `@attach("${src.title}") `
+        : src.title.includes(' ')
+        ? `@attach("${src.title}") `
+        : `@${src.title} `;
 
       const replacedBefore = textBefore.replace(
-        /(?:@attach\s*\(?"?|@)([a-zA-Z0-9_\-\.\s]*)$/i,
-        replacementToken
+        /(^|\s)(?:@attach\s*\(?"?|@)([a-zA-Z0-9_\-\.\s()]*)$/i,
+        `$1${replacementToken}`
       );
       const newVal = replacedBefore + textAfter;
       onChangeInput(newVal);
@@ -271,6 +260,17 @@ export function ChatComposer({
     return FileText;
   };
 
+  const getSourceIconColor = (type: string, name?: string) => {
+    const t = (type || '').toLowerCase();
+    const n = (name || '').toLowerCase();
+    if (t === 'pdf' || t === 'application/pdf' || n.endsWith('.pdf')) return 'text-rose-500';
+    if (t === 'docx' || t.includes('word') || n.endsWith('.docx') || n.endsWith('.doc')) return 'text-blue-600';
+    if (t === 'xlsx' || t.includes('spreadsheet') || t.includes('csv')) return 'text-emerald-600';
+    if (t === 'pptx' || t.includes('presentation')) return 'text-amber-600';
+    if (t.startsWith('image/') || t === 'image') return 'text-purple-500';
+    return 'text-[var(--primary)]';
+  };
+
   return (
     <div className="relative border-t border-[var(--border)] bg-[var(--surface)] p-3 shrink-0">
       {/* Attached Source Chips */}
@@ -278,12 +278,17 @@ export function ChatComposer({
         <div className="flex flex-wrap gap-1.5 mb-2 max-h-24 overflow-y-auto">
           {attachments.map((att) => {
             const Icon = getSourceIcon(att.type);
+            const iconColor = getSourceIconColor(att.type, att.name);
+            const isPdf = att.type === 'application/pdf' || att.type === 'pdf' || att.name.toLowerCase().endsWith('.pdf');
             return (
               <div
                 key={att.id}
-                className="flex items-center gap-1.5 rounded-lg border border-[var(--border)] bg-[var(--surface-elevated)] px-2 py-1 text-xs text-[var(--text)] animate-in fade-in duration-100 max-w-[200px]"
+                className="flex items-center gap-1.5 rounded-lg border border-[var(--border)] bg-[var(--surface-elevated)] px-2 py-1 text-xs text-[var(--text)] animate-in fade-in duration-100 max-w-[220px]"
               >
-                <Icon className="h-3.5 w-3.5 text-[var(--primary)] shrink-0" />
+                <Icon className={`h-3.5 w-3.5 shrink-0 ${iconColor}`} />
+                {isPdf && (
+                  <span className="rounded bg-rose-500/15 px-1 py-0 text-[9px] font-bold text-rose-600 shrink-0">PDF</span>
+                )}
                 <span className="truncate text-[11px] font-medium">{att.name}</span>
                 <button
                   type="button"
@@ -299,47 +304,55 @@ export function ChatComposer({
         </div>
       )}
 
-      {/* @attach Source Mention Autocomplete Dropdown */}
-      {autocompleteOpen && filteredSources.length > 0 && (
+      {/* @attach Source Mention Autocomplete Dropdown (strictly current workspace document sources) */}
+      {autocompleteOpen && (
         <div className="absolute bottom-full left-3 mb-2 z-50 w-80 max-h-60 overflow-y-auto rounded-xl border border-[var(--border)] bg-[var(--surface)] p-1.5 shadow-2xl animate-in fade-in slide-in-from-bottom-2 duration-100 select-none text-xs">
           <div className="flex items-center justify-between px-2 py-1 text-[10px] font-semibold uppercase tracking-wider text-[var(--text-muted)] border-b border-[var(--border-subtle)] mb-1">
             <span className="flex items-center gap-1">
               <AtSign className="h-3 w-3 text-[var(--primary)]" />
-              <span>Reference Workspace File (@)</span>
+              <span>Workspace Document Sources (@)</span>
             </span>
-            <span className="text-[9px] opacity-70">↑↓ to navigate, Enter to select</span>
+            <span className="text-[9px] opacity-70">↑↓ Enter</span>
           </div>
 
-          <div className="space-y-0.5">
-            {filteredSources.map((src, index) => {
-              const Icon = getSourceIcon(src.type);
-              const isSelected = index === highlightedIndex;
+          {filteredSources.length > 0 ? (
+            <div className="space-y-0.5">
+              {filteredSources.map((src, index) => {
+                const Icon = getSourceIcon(src.type);
+                const isSelected = index === highlightedIndex;
 
-              return (
-                <button
-                  key={`${src.id}-${index}`}
-                  type="button"
-                  onClick={() => selectSource(src)}
-                  onMouseEnter={() => setHighlightedIndex(index)}
-                  className={`w-full flex items-center justify-between gap-2 rounded-lg px-2.5 py-1.5 text-left transition-colors cursor-pointer min-h-[32px] ${
-                    isSelected
-                      ? 'bg-[var(--accent)] text-[var(--primary)] font-medium'
-                      : 'text-[var(--text)] hover:bg-[var(--accent)]/60'
-                  }`}
-                >
-                  <div className="flex items-center gap-2 min-w-0">
-                    <Icon className="h-3.5 w-3.5 text-[var(--primary)] shrink-0" />
-                    <span className="truncate text-xs">{src.title}</span>
-                  </div>
-                  {src.size && (
-                    <span className="text-[10px] text-[var(--text-muted)] shrink-0 font-mono">
-                      {src.size}
-                    </span>
-                  )}
-                </button>
-              );
-            })}
-          </div>
+                return (
+                  <button
+                    key={`${src.id}-${index}`}
+                    type="button"
+                    onClick={() => selectSource(src)}
+                    onMouseEnter={() => setHighlightedIndex(index)}
+                    className={`w-full flex items-center justify-between gap-2 rounded-lg px-2.5 py-1.5 text-left transition-colors cursor-pointer min-h-[32px] ${
+                      isSelected
+                        ? 'bg-[var(--accent)] text-[var(--primary)] font-medium'
+                        : 'text-[var(--text)] hover:bg-[var(--accent)]/60'
+                    }`}
+                  >
+                    <div className="flex items-center gap-2 min-w-0">
+                      <Icon className="h-3.5 w-3.5 text-[var(--primary)] shrink-0" />
+                      <span className="truncate text-xs">{src.title}</span>
+                    </div>
+                    {src.size && (
+                      <span className="text-[10px] text-[var(--text-muted)] shrink-0 font-mono">
+                        {src.size}
+                      </span>
+                    )}
+                  </button>
+                );
+              })}
+            </div>
+          ) : (
+            <div className="px-2.5 py-3 text-center text-[11px] text-[var(--text-muted)]">
+              {candidateSources.length === 0
+                ? 'No documents in Sources for this workspace yet. Upload one via Attach.'
+                : `No document source matching "${autocompleteQuery.trim()}".`}
+            </div>
+          )}
         </div>
       )}
 

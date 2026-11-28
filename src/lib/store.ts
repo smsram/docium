@@ -194,6 +194,17 @@ interface WorkspaceState {
     messageId: string,
     updates: Partial<AiChatMessage>
   ) => void;
+  replaceAndTruncateFromMessage: (
+    documentId: string,
+    conversationId: string,
+    messageId: string,
+    newContent: string
+  ) => AiChatMessage | null;
+  truncateConversationFromMessage: (
+    documentId: string,
+    conversationId: string,
+    messageId: string
+  ) => void;
   setConversationRunStatus: (
     documentId: string,
     conversationId: string,
@@ -1121,12 +1132,28 @@ export const useWorkspaceStore = create<WorkspaceState>()(
       },
 
       addSource: (source) => {
-        const newSource: ResearchSource = {
+        const incoming: ResearchSource = {
           ...source,
           id: (source as any).id || `src-${Date.now()}`,
           addedAt: (source as any).addedAt || new Date().toISOString(),
         };
-        set((state) => ({ sources: [newSource, ...state.sources] }));
+        set((state) => {
+          const existing = state.sources || [];
+          const matchIdx = existing.findIndex(
+            (s) =>
+              s.id === incoming.id ||
+              (incoming.contentHash &&
+                s.contentHash &&
+                s.contentHash === incoming.contentHash &&
+                (!incoming.workspaceId || !s.workspaceId || s.workspaceId === incoming.workspaceId))
+          );
+          if (matchIdx >= 0) {
+            const next = [...existing];
+            next[matchIdx] = { ...next[matchIdx], ...incoming };
+            return { sources: next };
+          }
+          return { sources: [incoming, ...existing] };
+        });
       },
 
       deleteSource: (id) => {
@@ -1137,7 +1164,7 @@ export const useWorkspaceStore = create<WorkspaceState>()(
         const newMsg: AiChatMessage = {
           ...message,
           id: `msg-${Date.now()}`,
-          timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+          timestamp: new Date().toISOString(),
         };
         set((state) => ({ aiMessages: [...state.aiMessages, newMsg] }));
       },
@@ -1149,7 +1176,7 @@ export const useWorkspaceStore = create<WorkspaceState>()(
               id: `msg-${Date.now()}`,
               role: 'assistant',
               content: 'Chat history cleared. How can I assist with your workspace today?',
-              timestamp: 'Just now',
+              timestamp: new Date().toISOString(),
             },
           ],
         });
@@ -1164,7 +1191,7 @@ export const useWorkspaceStore = create<WorkspaceState>()(
         const newMsg: AiChatMessage = {
           ...message,
           id: `msg-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
-          timestamp: 'Just now',
+          timestamp: new Date().toISOString(),
         };
         set((state) => ({
           itemConversations: {
@@ -1188,17 +1215,32 @@ export const useWorkspaceStore = create<WorkspaceState>()(
       },
 
       addItemSource: (itemId, source) => {
-        const newSource: ResearchSource = {
+        const incoming: ResearchSource = {
           ...source,
-          id: `src-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
-          addedAt: new Date().toISOString(),
+          id: (source as any).id || `src-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
+          addedAt: (source as any).addedAt || new Date().toISOString(),
         };
-        set((state) => ({
-          itemSources: {
-            ...state.itemSources,
-            [itemId]: [...(state.itemSources?.[itemId] || []), newSource],
-          },
-        }));
+        set((state) => {
+          const prev = state.itemSources?.[itemId] || [];
+          const idx = prev.findIndex(
+            (s) =>
+              s.id === incoming.id ||
+              (incoming.contentHash && s.contentHash && s.contentHash === incoming.contentHash) ||
+              (s.title.toLowerCase() === incoming.title.toLowerCase() &&
+                ((s.fileSize && incoming.fileSize && s.fileSize === incoming.fileSize) ||
+                  s.tags?.includes('Upload')))
+          );
+          const updated =
+            idx >= 0
+              ? prev.map((s, i) => (i === idx ? { ...s, ...incoming } : s))
+              : [...prev, incoming];
+          return {
+            itemSources: {
+              ...state.itemSources,
+              [itemId]: updated,
+            },
+          };
+        });
       },
 
       removeItemSource: (itemId, sourceId) => {
@@ -1427,7 +1469,7 @@ export const useWorkspaceStore = create<WorkspaceState>()(
         const newMsg: AiChatMessage = {
           ...message,
           id: message.id || `msg-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
-          timestamp: message.timestamp || 'Just now',
+          timestamp: message.timestamp && message.timestamp !== 'Just now' ? message.timestamp : new Date().toISOString(),
         };
 
         set((state) => {
@@ -1500,6 +1542,95 @@ export const useWorkspaceStore = create<WorkspaceState>()(
               ...state.documentConversations,
               [documentId]: updatedConvs,
             },
+          };
+        });
+      },
+
+      replaceAndTruncateFromMessage: (documentId, conversationId, messageId, newContent) => {
+        let updatedMessage: AiChatMessage | null = null;
+        const nowIso = new Date().toISOString();
+        set((state) => {
+          const transformMessages = (msgs: AiChatMessage[]) => {
+            const idx = msgs.findIndex((m) => m.id === messageId);
+            if (idx === -1) return msgs;
+            const target = msgs[idx];
+            updatedMessage = {
+              ...target,
+              content: newContent,
+              timestamp: nowIso,
+            };
+            return [...msgs.slice(0, idx), updatedMessage];
+          };
+
+          if (documentId === 'general') {
+            return {
+              generalConversations: state.generalConversations.map((c) =>
+                c.id === conversationId
+                  ? { ...c, messages: transformMessages(c.messages), updatedAt: nowIso }
+                  : c
+              ),
+            };
+          }
+
+          const existingConvs = state.documentConversations?.[documentId] || [];
+          const updatedConvs = existingConvs.map((conv) =>
+            conv.id === conversationId
+              ? { ...conv, messages: transformMessages(conv.messages), updatedAt: nowIso }
+              : conv
+          );
+
+          return {
+            documentConversations: {
+              ...state.documentConversations,
+              [documentId]: updatedConvs,
+            },
+            itemConversations: state.itemConversations?.[documentId]
+              ? {
+                  ...state.itemConversations,
+                  [documentId]: transformMessages(state.itemConversations[documentId]),
+                }
+              : state.itemConversations,
+          };
+        });
+        return updatedMessage;
+      },
+
+      truncateConversationFromMessage: (documentId, conversationId, messageId) => {
+        const nowIso = new Date().toISOString();
+        set((state) => {
+          const sliceBefore = (msgs: AiChatMessage[]) => {
+            const idx = msgs.findIndex((m) => m.id === messageId);
+            return idx === -1 ? msgs : msgs.slice(0, idx);
+          };
+
+          if (documentId === 'general') {
+            return {
+              generalConversations: state.generalConversations.map((c) =>
+                c.id === conversationId
+                  ? { ...c, messages: sliceBefore(c.messages), updatedAt: nowIso }
+                  : c
+              ),
+            };
+          }
+
+          const existingConvs = state.documentConversations?.[documentId] || [];
+          const updatedConvs = existingConvs.map((conv) =>
+            conv.id === conversationId
+              ? { ...conv, messages: sliceBefore(conv.messages), updatedAt: nowIso }
+              : conv
+          );
+
+          return {
+            documentConversations: {
+              ...state.documentConversations,
+              [documentId]: updatedConvs,
+            },
+            itemConversations: state.itemConversations?.[documentId]
+              ? {
+                  ...state.itemConversations,
+                  [documentId]: sliceBefore(state.itemConversations[documentId]),
+                }
+              : state.itemConversations,
           };
         });
       },
@@ -1604,7 +1735,7 @@ export const useWorkspaceStore = create<WorkspaceState>()(
       },
 
       addDocumentSource: (documentId, source) => {
-        const newSource: ResearchSource = {
+        const incoming: ResearchSource = {
           ...source,
           id: (source as any).id || `src-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
           addedAt: (source as any).addedAt || new Date().toISOString(),
@@ -1612,14 +1743,30 @@ export const useWorkspaceStore = create<WorkspaceState>()(
           scope: 'document',
         };
 
+        const upsertSourceList = (list: ResearchSource[]) => {
+          const idx = list.findIndex(
+            (s) =>
+              s.id === incoming.id ||
+              (incoming.contentHash && s.contentHash && s.contentHash === incoming.contentHash) ||
+              (s.title.toLowerCase() === incoming.title.toLowerCase() &&
+                ((s.fileSize && incoming.fileSize && s.fileSize === incoming.fileSize) ||
+                  s.tags?.includes('Upload') ||
+                  (!s.extractedText && Boolean(incoming.extractedText))))
+          );
+          if (idx >= 0) {
+            return list.map((s, i) => (i === idx ? { ...s, ...incoming } : s));
+          }
+          return [...list, incoming];
+        };
+
         set((state) => ({
           documentSources: {
             ...state.documentSources,
-            [documentId]: [...(state.documentSources?.[documentId] || []), newSource],
+            [documentId]: upsertSourceList(state.documentSources?.[documentId] || []),
           },
           itemSources: {
             ...state.itemSources,
-            [documentId]: [...(state.itemSources?.[documentId] || []), newSource],
+            [documentId]: upsertSourceList(state.itemSources?.[documentId] || []),
           },
         }));
       },

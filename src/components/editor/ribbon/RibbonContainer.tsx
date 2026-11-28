@@ -165,7 +165,7 @@ export function RibbonContainer({
   }
 
   return (
-    <div className="border-b border-[var(--border)] bg-[var(--surface)] shrink-0 docium-ribbon select-none">
+    <div className="border-b border-[var(--border)] bg-[var(--surface)] shrink-0 docium-ribbon print:hidden select-none">
       {/* Ribbon Tab Bar */}
       <div className="flex h-9 items-center justify-between border-b border-[var(--border-subtle)] px-3">
         <div className="flex items-center gap-1">

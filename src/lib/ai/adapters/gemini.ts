@@ -63,7 +63,22 @@ export class GeminiAdapter implements BaseProviderAdapter {
         }
         contents.push({ role: 'model', parts: parts.length > 0 ? parts : [{ text: '' }] });
       } else {
-        contents.push({ role: 'user', parts: [{ text: m.content }] });
+        const parts: unknown[] = [{ text: m.content }];
+        if (m.images && m.images.length > 0) {
+          for (const img of m.images) {
+            if (typeof img !== 'string') continue;
+            const match = img.trim().match(/^data:(image\/[a-zA-Z0-9.+_-]+);base64,([\s\S]+)$/);
+            if (match) {
+              parts.push({
+                inlineData: {
+                  mimeType: match[1],
+                  data: match[2].replace(/\s+/g, ''),
+                },
+              });
+            }
+          }
+        }
+        contents.push({ role: 'user', parts });
       }
     }
 

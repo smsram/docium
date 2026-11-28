@@ -157,6 +157,27 @@ export function HomeTab({ editor, formatPainterActive, onToggleFormatPainter }: 
     });
   }, [editor, findQuery, caseSensitive, editor?.state.doc]);
 
+  // Sync Find & Replace highlights on the editor canvas without stealing input focus
+  useEffect(() => {
+    if (!editor || editor.isDestroyed) return;
+    if (!showFindReplace || !findQuery.trim() || findResults.matches.length === 0) {
+      editor.commands.clearFindHighlight?.();
+      return;
+    }
+    const bounded = Math.max(0, Math.min(activeMatchIdx, findResults.matches.length - 1));
+    editor.commands.setFindHighlight?.(
+      findResults.matches.map((m) => ({ from: m.from, to: m.to })),
+      bounded
+    );
+    const raf = requestAnimationFrame(() => {
+      const activeEl = document.querySelector('[data-docium-active-match="true"]') as HTMLElement | null;
+      if (activeEl) {
+        activeEl.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'nearest' });
+      }
+    });
+    return () => cancelAnimationFrame(raf);
+  }, [editor, showFindReplace, findQuery, findResults, activeMatchIdx]);
+
   if (!editor) return null;
 
   // Helper that restores non-empty selection if a popover/search input briefly took focus
@@ -167,7 +188,9 @@ export function HomeTab({ editor, formatPainterActive, onToggleFormatPainter }: 
       const maxPos = editor.state.doc.content.size;
       const from = Math.max(0, Math.min(savedSelectionRef.current.from, maxPos));
       const to = Math.max(from, Math.min(savedSelectionRef.current.to, maxPos));
-      if (to > from) {
+      if (from === 0 && to === maxPos) {
+        chain.selectAll();
+      } else if (to > from) {
         chain.setTextSelection({ from, to });
       }
     }
@@ -391,8 +414,19 @@ export function HomeTab({ editor, formatPainterActive, onToggleFormatPainter }: 
     setActiveMatchIdx(bounded);
     const match = findResults.matches[bounded];
     if (match) {
-      editor.chain().setTextSelection({ from: match.from, to: match.to }).scrollIntoView().run();
       savedSelectionRef.current = { from: match.from, to: match.to, empty: false };
+      editor.commands.setFindHighlight?.(
+        findResults.matches.map((m) => ({ from: m.from, to: m.to })),
+        bounded
+      );
+      requestAnimationFrame(() => {
+        const activeEl = document.querySelector('[data-docium-active-match="true"]') as HTMLElement | null;
+        if (activeEl) {
+          activeEl.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'nearest' });
+        } else {
+          editor.chain().setTextSelection({ from: match.from, to: match.to }).scrollIntoView().run();
+        }
+      });
     }
   };
 
@@ -401,13 +435,13 @@ export function HomeTab({ editor, formatPainterActive, onToggleFormatPainter }: 
     const idx = Math.min(activeMatchIdx, findResults.matches.length - 1);
     const match = findResults.matches[idx];
     if (match) {
-      replaceTextInRange(editor, { from: match.from, to: match.to }, replaceQuery);
+      replaceTextInRange(editor, { from: match.from, to: match.to }, replaceQuery, { plainTextOnly: true });
     }
   };
 
   const handleReplaceAll = () => {
     if (!findQuery.trim()) return;
-    replaceAllMatches(editor, findQuery, replaceQuery, { caseSensitive });
+    replaceAllMatches(editor, findQuery, replaceQuery, { caseSensitive, plainTextOnly: true });
     setActiveMatchIdx(0);
   };
 
@@ -1053,6 +1087,7 @@ export function HomeTab({ editor, formatPainterActive, onToggleFormatPainter }: 
                 <div className="flex items-center gap-1">
                   <button
                     type="button"
+                    onMouseDown={preventFocusLoss}
                     disabled={findResults.totalMatches === 0}
                     onClick={() => jumpToMatch(activeMatchIdx - 1)}
                     className="h-6 w-6 flex items-center justify-center rounded border border-[var(--border)] bg-[var(--surface-elevated)] hover:bg-[var(--accent)] disabled:opacity-40"
@@ -1062,6 +1097,7 @@ export function HomeTab({ editor, formatPainterActive, onToggleFormatPainter }: 
                   </button>
                   <button
                     type="button"
+                    onMouseDown={preventFocusLoss}
                     disabled={findResults.totalMatches === 0}
                     onClick={() => jumpToMatch(activeMatchIdx + 1)}
                     className="h-6 w-6 flex items-center justify-center rounded border border-[var(--border)] bg-[var(--surface-elevated)] hover:bg-[var(--accent)] disabled:opacity-40"
@@ -1075,6 +1111,7 @@ export function HomeTab({ editor, formatPainterActive, onToggleFormatPainter }: 
               <div className="flex items-center gap-1.5 pt-1 border-t border-[var(--border-subtle)]">
                 <button
                   type="button"
+                  onMouseDown={preventFocusLoss}
                   disabled={findResults.totalMatches === 0}
                   onClick={handleReplaceCurrent}
                   className="flex-1 rounded-lg border border-[var(--border)] bg-[var(--surface-elevated)] py-1.5 text-xs font-medium hover:bg-[var(--accent)] disabled:opacity-40"
@@ -1083,6 +1120,7 @@ export function HomeTab({ editor, formatPainterActive, onToggleFormatPainter }: 
                 </button>
                 <button
                   type="button"
+                  onMouseDown={preventFocusLoss}
                   disabled={findResults.totalMatches === 0}
                   onClick={handleReplaceAll}
                   className="flex-1 rounded-lg bg-[var(--primary)] text-white py-1.5 text-xs font-medium hover:opacity-90 disabled:opacity-40"

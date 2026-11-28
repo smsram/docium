@@ -65,7 +65,27 @@ export class AnthropicAdapter implements BaseProviderAdapter {
           formattedMessages.push({ role: 'assistant', content: m.content });
         }
       } else {
-        formattedMessages.push({ role: 'user', content: m.content });
+        if (m.images && m.images.length > 0) {
+          const contentBlocks: unknown[] = [];
+          for (const img of m.images) {
+            if (typeof img !== 'string') continue;
+            const match = img.trim().match(/^data:(image\/(?:jpeg|png|webp|gif));base64,([\s\S]+)$/i);
+            if (match) {
+              contentBlocks.push({
+                type: 'image',
+                source: {
+                  type: 'base64',
+                  media_type: match[1].toLowerCase(),
+                  data: match[2].replace(/\s+/g, ''),
+                },
+              });
+            }
+          }
+          contentBlocks.push({ type: 'text', text: m.content });
+          formattedMessages.push({ role: 'user', content: contentBlocks });
+        } else {
+          formattedMessages.push({ role: 'user', content: m.content });
+        }
       }
     }
 

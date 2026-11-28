@@ -92,7 +92,7 @@ export function DocumentOutline({ editor, isOpen, onClose }: DocumentOutlineProp
         aria-hidden="true"
       />
 
-      <aside className="fixed inset-y-0 left-0 z-40 md:static md:z-10 w-64 border-r border-[var(--border)] bg-[var(--surface)] flex flex-col shrink-0 text-xs shadow-xl md:shadow-xs select-none animate-in slide-in-from-left duration-150">
+      <aside className="print:hidden fixed inset-y-0 left-0 z-40 md:static md:z-10 w-64 border-r border-[var(--border)] bg-[var(--surface)] flex flex-col shrink-0 text-xs shadow-xl md:shadow-xs select-none animate-in slide-in-from-left duration-150">
         {/* Title & Close */}
         <div className="flex h-11 items-center justify-between px-3 border-b border-[var(--border)] bg-[var(--surface-elevated)] shrink-0">
           <div className="flex items-center gap-1.5 font-semibold text-[var(--text)]">

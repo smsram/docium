@@ -23,6 +23,8 @@ interface PageSetupModalProps {
   footerText?: string;
   firstPageHeaderText?: string;
   firstPageFooterText?: string;
+  showHeaderLine?: boolean;
+  showFooterLine?: boolean;
   showPageNumbers?: boolean;
   differentFirstPage?: boolean;
   onSave: (settings: {
@@ -35,6 +37,8 @@ interface PageSetupModalProps {
     footerText?: string;
     firstPageHeaderText?: string;
     firstPageFooterText?: string;
+    showHeaderLine?: boolean;
+    showFooterLine?: boolean;
     showPageNumbers?: boolean;
     differentFirstPage?: boolean;
     customDimensions?: { widthMm: number; heightMm: number };
@@ -53,6 +57,8 @@ export function PageSetupModal({
   footerText: initialFooterText = '',
   firstPageHeaderText: initialFirstPageHeaderText = '',
   firstPageFooterText: initialFirstPageFooterText = '',
+  showHeaderLine: initialShowHeaderLine = false,
+  showFooterLine: initialShowFooterLine = false,
   showPageNumbers: initialShowPageNumbers = false,
   differentFirstPage: initialDifferentFirstPage = false,
   onSave,
@@ -71,6 +77,8 @@ export function PageSetupModal({
   const [footerText, setFooterText] = useState(initialFooterText);
   const [firstPageHeaderText, setFirstPageHeaderText] = useState(initialFirstPageHeaderText);
   const [firstPageFooterText, setFirstPageFooterText] = useState(initialFirstPageFooterText);
+  const [showHeaderLine, setShowHeaderLine] = useState(initialShowHeaderLine);
+  const [showFooterLine, setShowFooterLine] = useState(initialShowFooterLine);
   const [showPageNumbers, setShowPageNumbers] = useState(initialShowPageNumbers);
   const [differentFirstPage, setDifferentFirstPage] = useState(initialDifferentFirstPage);
   const [customWidthMm, setCustomWidthMm] = useState(210);
@@ -110,6 +118,8 @@ export function PageSetupModal({
       footerText,
       firstPageHeaderText,
       firstPageFooterText,
+      showHeaderLine,
+      showFooterLine,
       showPageNumbers,
       differentFirstPage,
       customDimensions: pageSize === 'custom' ? { widthMm: customWidthMm, heightMm: customHeightMm } : undefined,
@@ -312,6 +322,27 @@ export function PageSetupModal({
                   className="rounded accent-[var(--primary)]"
                 />
                 Different first page
+              </label>
+            </div>
+
+            <div className="flex items-center justify-between pt-1">
+              <label className="text-xs text-[var(--text)] cursor-pointer flex items-center gap-2">
+                <input
+                  type="checkbox"
+                  checked={showHeaderLine}
+                  onChange={(e) => setShowHeaderLine(e.target.checked)}
+                  className="rounded accent-[var(--primary)]"
+                />
+                Header divider line
+              </label>
+              <label className="text-xs text-[var(--text)] cursor-pointer flex items-center gap-2">
+                <input
+                  type="checkbox"
+                  checked={showFooterLine}
+                  onChange={(e) => setShowFooterLine(e.target.checked)}
+                  className="rounded accent-[var(--primary)]"
+                />
+                Footer divider line
               </label>
             </div>
 

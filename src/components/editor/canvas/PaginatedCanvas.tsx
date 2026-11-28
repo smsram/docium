@@ -1,7 +1,9 @@
 'use client';
 
 import React, { useEffect, useRef, useState, useCallback } from 'react';
+import { flushSync } from 'react-dom';
 import { type Editor, EditorContent } from '@tiptap/react';
+import { canJoin, canSplit } from '@tiptap/pm/transform';
 import { PageDimensions } from '../utils/pageMetrics';
 import {
   AlignLeft,
@@ -29,6 +31,8 @@ interface PaginatedCanvasProps {
   onUpdateFirstPageHeaderText?: (text: string) => void;
   onUpdateFirstPageFooterText?: (text: string) => void;
   showPageNumbers?: boolean;
+  showHeaderLine?: boolean;
+  showFooterLine?: boolean;
   differentFirstPage?: boolean;
   onToggleDifferentFirstPage?: () => void;
   columns?: 1 | 2 | 3;
@@ -64,6 +68,8 @@ export function PaginatedCanvas({
   onUpdateFirstPageHeaderText,
   onUpdateFirstPageFooterText,
   showPageNumbers = false,
+  showHeaderLine = false,
+  showFooterLine = false,
   differentFirstPage = false,
   onToggleDifferentFirstPage,
   columns = 1,
@@ -86,6 +92,7 @@ export function PaginatedCanvas({
   const isMutatingPaginationRef = useRef(false);
 
   const [pageCount, setPageCount] = useState(1);
+  const [isPrinting, setIsPrinting] = useState(false);
 
   const [editingSection, setEditingSection] = useState<{
     type: 'header' | 'footer';
@@ -96,7 +103,7 @@ export function PaginatedCanvas({
   const [draftAlign, setDraftAlign] = useState<'left' | 'center' | 'right'>('left');
 
   const { widthPx, heightPx, marginsPx } = pageDimensions;
-  const scale = zoomLevel / 100;
+  const scale = isPrinting ? 1 : zoomLevel / 100;
 
   const headerHeightPx = Math.max(36, marginsPx.top);
   const footerHeightPx = Math.max(36, marginsPx.bottom);
@@ -106,7 +113,8 @@ export function PaginatedCanvas({
     heightPx - headerHeightPx - footerHeightPx
   );
 
-  const pageStridePx = heightPx + PAGE_GAP_PX;
+  const activeGapPx = isPrinting ? 0 : PAGE_GAP_PX;
+  const pageStridePx = heightPx + activeGapPx;
   const effectivePaperBg = pageColor || '#FFFFFF';
 
   const resolvePageTokens = useCallback(
@@ -313,57 +321,42 @@ export function PaginatedCanvas({
       };
 
       // Merge any previously split continuation tables back together before re-paginating
-      // so edits/reflows never leave fragmented table rows with gaps on the same page.
+      // using structural tr.join() so prosemirror-history steps inside table cells remain intact for Undo/Redo.
       if (!isSplittingRef.current && editor.state.schema.nodes.table) {
         const { doc: curDoc, schema: curSchema } = editor.state;
         const tblType = curSchema.nodes.table;
-        const mergeCandidates: Array<{ from: number; to: number; mergedNode: any }> = [];
+        const joinPositions: number[] = [];
         const topNodes: Array<{ node: any; pos: number }> = [];
         curDoc.forEach((n, off) => topNodes.push({ node: n, pos: off }));
 
-        let idx = 0;
-        while (idx < topNodes.length) {
+        for (let idx = 0; idx < topNodes.length - 1; idx++) {
           const cur = topNodes[idx];
-          if (cur.node.type === tblType) {
-            let endIdx = idx;
-            const collectedRows: any[] = [];
-            cur.node.forEach((r: any) => collectedRows.push(r));
-            while (
-              endIdx + 1 < topNodes.length &&
-              topNodes[endIdx + 1].node.type === tblType &&
-              topNodes[endIdx + 1].node.attrs?.isContinuation
-            ) {
-              endIdx++;
-              topNodes[endIdx].node.forEach((r: any) => collectedRows.push(r));
-            }
-            if (endIdx > idx) {
-              const lastNode = topNodes[endIdx];
-              const mergedTable = tblType.create(
-                { ...cur.node.attrs, isContinuation: false },
-                collectedRows
-              );
-              mergeCandidates.push({
-                from: cur.pos,
-                to: lastNode.pos + lastNode.node.nodeSize,
-                mergedNode: mergedTable,
-              });
-            }
-            idx = endIdx + 1;
-          } else {
-            idx++;
+          const next = topNodes[idx + 1];
+          if (
+            cur.node.type === tblType &&
+            next.node.type === tblType &&
+            next.node.attrs?.isContinuation
+          ) {
+            joinPositions.push(next.pos);
           }
         }
 
-        if (mergeCandidates.length > 0) {
+        if (joinPositions.length > 0) {
           isSplittingRef.current = true;
           try {
             pmDomObserver?.start?.();
             const tr = editor.state.tr.setMeta('addToHistory', false);
-            for (let m = mergeCandidates.length - 1; m >= 0; m--) {
-              const mc = mergeCandidates[m];
-              tr.replaceWith(mc.from, mc.to, mc.mergedNode);
+            let didJoin = false;
+            for (let j = joinPositions.length - 1; j >= 0; j--) {
+              const joinPos = joinPositions[j];
+              if (canJoin(tr.doc, joinPos)) {
+                tr.join(joinPos, 1);
+                didJoin = true;
+              }
             }
-            editor.view.dispatch(tr);
+            if (didJoin) {
+              editor.view.dispatch(tr);
+            }
           } finally {
             pmDomObserver?.stop?.();
             isSplittingRef.current = false;
@@ -429,25 +422,26 @@ export function PaginatedCanvas({
           const pagePrintableStart = currentPage * pageStridePx + headerHeightPx;
           const pagePrintableEnd = pagePrintableStart + pageContentHeightPx;
           const isHeading = /^H[1-6]$/.test(el.tagName);
+          const isHr = el.tagName === 'HR';
 
-          // Word "Keep with next" for Headings: if heading + minimal 36px of next block doesn't fit, push heading to next page
+          // Word "Keep with next" for Headings and Horizontal Rules: if heading/hr + minimal 48px of next block doesn't fit, push to next page
           let headingKeepWithNextOverflow = false;
-          if (isHeading && i + 1 < units.length && elTop > pagePrintableStart + 24) {
+          if ((isHeading || isHr) && i + 1 < units.length && elTop > pagePrintableStart + 24) {
             const nextEl = units[i + 1];
             const isNextBreak =
               nextEl.classList.contains('docium-page-break') ||
               nextEl.getAttribute('data-type') === 'page-break';
-            if (!isNextBreak && elBottom + 44 > pagePrintableEnd) {
+            if (!isNextBreak && elBottom + 48 > pagePrintableEnd) {
               headingKeepWithNextOverflow = true;
             }
           }
 
-          const maxAllowedBottom = isHeading ? pagePrintableEnd - 36 : pagePrintableEnd - 2;
+          const maxAllowedBottom = isHeading || isHr ? pagePrintableEnd - 36 : pagePrintableEnd - 2;
 
           if (elBottom > maxAllowedBottom || headingKeepWithNextOverflow) {
             const pmInfo = domToPmNode.get(el);
 
-            // A. TABLE ROW BOUNDARY SPLIT (Word / Google Docs multi-page table flow)
+            // A. TABLE ROW BOUNDARY SPLIT (Word / Google Docs multi-page table flow; reversibly rejoined at pass start)
             if (allowSplit && pmInfo && pmInfo.node.type.name === 'table' && tableType && pmInfo.node.childCount >= 2) {
               const trElements = Array.from(el.querySelectorAll('tr')) as HTMLElement[];
               if (trElements.length === pmInfo.node.childCount && elTop < pagePrintableEnd - 44) {
@@ -461,23 +455,26 @@ export function PaginatedCanvas({
                 }
 
                 if (splitRowIndex >= 1 && splitRowIndex < trElements.length) {
-                  const rows: any[] = [];
-                  pmInfo.node.forEach((r: any) => rows.push(r));
-                  const firstRows = rows.slice(0, splitRowIndex);
-                  const secondRows = rows.slice(splitRowIndex);
-
-                  if (firstRows.length > 0 && secondRows.length > 0) {
-                    const t1 = tableType.create(pmInfo.node.attrs, firstRows);
-                    const t2Attrs = {
-                      ...pmInfo.node.attrs,
-                      ...(tableType.spec.attrs?.isContinuation ? { isContinuation: true } : {}),
-                    };
-                    const t2 = tableType.create(t2Attrs, secondRows);
+                  let rowBoundaryOffset = 1;
+                  let rCursor = 0;
+                  pmInfo.node.forEach((r: any) => {
+                    if (rCursor < splitRowIndex) {
+                      rowBoundaryOffset += r.nodeSize;
+                    }
+                    rCursor++;
+                  });
+                  const rowBoundaryPos = pmInfo.offset + rowBoundaryOffset;
+                  const t2Attrs = {
+                    ...pmInfo.node.attrs,
+                    ...(tableType.spec.attrs?.isContinuation ? { isContinuation: true } : {}),
+                  };
+                  const splitTypes = [{ type: tableType, attrs: t2Attrs }];
+                  if (canSplit(editor.state.doc, rowBoundaryPos, 1, splitTypes)) {
                     isSplittingRef.current = true;
                     try {
                       pmDomObserver?.start?.();
                       const tr = editor.state.tr
-                        .replaceWith(pmInfo.offset, pmInfo.offset + pmInfo.node.nodeSize, [t1, t2])
+                        .split(rowBoundaryPos, 1, splitTypes)
                         .setMeta('addToHistory', false);
                       editor.view.dispatch(tr);
                     } finally {
@@ -491,80 +488,7 @@ export function PaginatedCanvas({
               }
             }
 
-            // B. PARAGRAPH LINE BOUNDARY SPLIT
-            if (
-              allowSplit &&
-              pmInfo &&
-              pmInfo.node.type.name === 'paragraph' &&
-              elTop < pagePrintableEnd - 38 &&
-              elHeight >= 42
-            ) {
-              const splitPos = findParagraphBoundarySplitPos(
-                pmInfo.node,
-                pmInfo.offset,
-                el,
-                sheetEl,
-                elTop,
-                elHeight,
-                pagePrintableEnd,
-                effScale
-              );
-              if (
-                splitPos !== null &&
-                splitPos > pmInfo.offset + 12 &&
-                splitPos < pmInfo.offset + pmInfo.node.nodeSize - 12
-              ) {
-                isSplittingRef.current = true;
-                try {
-                  pmDomObserver?.start?.();
-                  const tr = editor.state.tr.split(splitPos).setMeta('addToHistory', false);
-                  editor.view.dispatch(tr);
-                  splitDispatchedInPass = true;
-                } catch {
-                  // Fall through to block push
-                } finally {
-                  pmDomObserver?.stop?.();
-                  isSplittingRef.current = false;
-                }
-                if (splitDispatchedInPass) break;
-              }
-            }
-
-            // C. CODE BLOCK LINE BOUNDARY SPLIT
-            if (
-              allowSplit &&
-              pmInfo &&
-              pmInfo.node.type.name === 'codeBlock' &&
-              codeBlockType &&
-              elTop < pagePrintableEnd - 48
-            ) {
-              const text = pmInfo.node.textContent || '';
-              const lines = text.split(/\r?\n/);
-              const availableHeight = pagePrintableEnd - elTop - 24;
-              const linesThatFit = Math.floor(availableHeight / 19);
-              if (linesThatFit >= 2 && linesThatFit < lines.length) {
-                const part1 = lines.slice(0, linesThatFit).join('\n');
-                const part2 = lines.slice(linesThatFit).join('\n');
-                const attrs = pmInfo.node.attrs || { language: 'plaintext' };
-                const cb1 = codeBlockType.create(attrs, part1 ? schema.text(part1) : undefined);
-                const cb2 = codeBlockType.create(attrs, part2 ? schema.text(part2) : undefined);
-                isSplittingRef.current = true;
-                try {
-                  pmDomObserver?.start?.();
-                  const tr = editor.state.tr
-                    .replaceWith(pmInfo.offset, pmInfo.offset + pmInfo.node.nodeSize, [cb1, cb2])
-                    .setMeta('addToHistory', false);
-                  editor.view.dispatch(tr);
-                } finally {
-                  pmDomObserver?.stop?.();
-                  isSplittingRef.current = false;
-                }
-                splitDispatchedInPass = true;
-                break;
-              }
-            }
-
-            // D. PUSH BLOCK TO NEXT PAGE'S PRINTABLE AREA
+            // B. PUSH BLOCK TO NEXT PAGE'S PRINTABLE AREA (Non-destructive CSS margin push; preserves paragraph/codeBlock integrity)
             if (elTop > pagePrintableStart + 4) {
               const targetPage = currentPage + 1;
               const targetPrintableStart = targetPage * pageStridePx + headerHeightPx;
@@ -681,6 +605,330 @@ export function PaginatedCanvas({
     marginsPx.right,
     columns,
   ]);
+
+  const printStateRef = useRef({
+    isPaginatedView,
+    pageCount,
+    widthPx,
+    heightPx,
+    pageStridePx,
+    headerHeightPx,
+    footerHeightPx,
+    pageContentHeightPx,
+    effectivePaperBg,
+    marginsLeftPx: marginsPx.left,
+    marginsRightPx: marginsPx.right,
+    columnCount: columns > 1 ? columns : 1,
+    scale,
+  });
+  printStateRef.current = {
+    isPaginatedView,
+    pageCount,
+    widthPx,
+    heightPx,
+    pageStridePx,
+    headerHeightPx,
+    footerHeightPx,
+    pageContentHeightPx,
+    effectivePaperBg,
+    marginsLeftPx: marginsPx.left,
+    marginsRightPx: marginsPx.right,
+    columnCount: columns > 1 ? columns : 1,
+    scale,
+  };
+
+  // Synchronously assemble clean, non-transformed per-page vector print sheets in document.body on Ctrl+P / window.print()
+  useEffect(() => {
+    if (typeof window === 'undefined' || typeof document === 'undefined') return;
+
+    const cleanupPrintPortal = () => {
+      document.body.classList.remove('docium-printing');
+      document.getElementById('docium-print-pages')?.remove();
+    };
+
+    const sanitizePrintSubtree = (srcEl: HTMLElement, cloneEl: HTMLElement, isFirstOnPage: boolean) => {
+      cloneEl
+        .querySelectorAll(
+          '[data-docium-ui-only="true"], [data-codeblock-ui="true"], .docium-page-break, .docium-section-break, [data-type="page-break"], .ProseMirror-separator, .ProseMirror-trailingBreak'
+        )
+        .forEach((el) => el.remove());
+
+      const clearPaginatedNode = (node: HTMLElement) => {
+        if (node.getAttribute('data-docium-paginated') === 'true') {
+          node.removeAttribute('data-docium-paginated');
+          node.style.removeProperty('margin-top');
+          node.style.removeProperty('margin-bottom');
+          node.style.removeProperty('height');
+          node.style.removeProperty('display');
+        }
+        node.removeAttribute('contenteditable');
+        node.classList.remove('docium-find-match', 'docium-find-match-active', 'ProseMirror-selectednode');
+      };
+
+      clearPaginatedNode(cloneEl);
+      cloneEl.querySelectorAll('*').forEach((child) => {
+        if (child instanceof HTMLElement) {
+          clearPaginatedNode(child);
+        }
+      });
+
+      if (isFirstOnPage) {
+        cloneEl.style.marginTop = '0px';
+      }
+
+      // Preserve canvas pixel drawings into <img> so printed charts/canvases never vanish
+      const srcCanvases = srcEl.querySelectorAll('canvas');
+      const dstCanvases = cloneEl.querySelectorAll('canvas');
+      srcCanvases.forEach((srcCanvas, idx) => {
+        const dstCanvas = dstCanvases[idx];
+        if (!dstCanvas || !dstCanvas.parentNode) return;
+        try {
+          const dataUrl = srcCanvas.toDataURL('image/png');
+          const img = document.createElement('img');
+          img.src = dataUrl;
+          img.className = dstCanvas.className;
+          img.style.cssText = dstCanvas.style.cssText;
+          const cr = srcCanvas.getBoundingClientRect();
+          if (cr.width > 0) img.style.width = `${cr.width}px`;
+          if (cr.height > 0) img.style.height = `${cr.height}px`;
+          dstCanvas.parentNode.replaceChild(img, dstCanvas);
+        } catch {
+          // ignore tainted canvases
+        }
+      });
+
+      return cloneEl;
+    };
+
+    const handleBeforePrint = () => {
+      flushSync(() => {
+        setEditingSection(null);
+      });
+
+      cleanupPrintPortal();
+      const cfg = printStateRef.current;
+      const contentEl = contentWrapperRef.current;
+      if (!contentEl) return;
+
+      const editorDom = (contentEl.querySelector('.tiptap') as HTMLElement | null) || contentEl;
+      const effScale = cfg.scale || 1;
+      const sheetStackEl = sheetStackRef.current;
+      const refEl = cfg.isPaginatedView && sheetStackEl ? sheetStackEl : contentEl;
+      const refRect = refEl.getBoundingClientRect();
+
+      const getRelTop = (el: HTMLElement) => (el.getBoundingClientRect().top - refRect.top) / effScale;
+
+      const totalPagesPrint =
+        cfg.isPaginatedView && sheetStackEl
+          ? cfg.pageCount
+          : Math.max(1, Math.ceil(Math.max(editorDom.scrollHeight, cfg.pageContentHeightPx) / cfg.pageContentHeightPx));
+
+      const pageBucketNodes: HTMLElement[][] = Array.from({ length: totalPagesPrint }, () => []);
+
+      const resolvePageIndex = (relTop: number): number => {
+        if (cfg.isPaginatedView) {
+          return Math.max(0, Math.min(totalPagesPrint - 1, Math.floor((relTop + 6) / cfg.pageStridePx)));
+        }
+        return Math.max(0, Math.min(totalPagesPrint - 1, Math.floor((relTop + 6) / cfg.pageContentHeightPx)));
+      };
+
+      Array.from(editorDom.children).forEach((child) => {
+        const el = child as HTMLElement;
+        if (
+          el.classList.contains('docium-page-break') ||
+          el.classList.contains('docium-section-break') ||
+          el.getAttribute('data-type') === 'page-break'
+        ) {
+          return;
+        }
+
+        if (el.tagName === 'UL' || el.tagName === 'OL') {
+          const directLis = Array.from(el.children).filter((c) => c.tagName === 'LI') as HTMLElement[];
+          if (directLis.length > 0) {
+            const perPageLis = new Map<number, HTMLElement[]>();
+            let firstListPage = totalPagesPrint;
+            directLis.forEach((li) => {
+              const pIdx = resolvePageIndex(getRelTop(li));
+              if (pIdx < firstListPage) firstListPage = pIdx;
+              const arr = perPageLis.get(pIdx) || [];
+              arr.push(li);
+              perPageLis.set(pIdx, arr);
+            });
+
+            if (perPageLis.size > 1) {
+              const origStart = el.tagName === 'OL' ? parseInt(el.getAttribute('start') || '1', 10) || 1 : 1;
+              let cumulativeOffset = 0;
+              const sortedPages = Array.from(perPageLis.keys()).sort((a, b) => a - b);
+              for (const pIdx of sortedPages) {
+                const groupLis = perPageLis.get(pIdx) || [];
+                const shell = el.cloneNode(false) as HTMLElement;
+                if (el.tagName === 'OL' && cumulativeOffset > 0) {
+                  shell.setAttribute('start', String(origStart + cumulativeOffset));
+                }
+                groupLis.forEach((li) => {
+                  shell.appendChild(li.cloneNode(true));
+                });
+                const isFirstOnPage = pageBucketNodes[pIdx].length === 0;
+                pageBucketNodes[pIdx].push(sanitizePrintSubtree(el, shell, isFirstOnPage));
+                cumulativeOffset += groupLis.length;
+              }
+              return;
+            }
+          }
+        }
+
+        const pIdx = resolvePageIndex(getRelTop(el));
+        const isFirstOnPage = pageBucketNodes[pIdx].length === 0;
+        const clonedChild = el.cloneNode(true) as HTMLElement;
+        pageBucketNodes[pIdx].push(sanitizePrintSubtree(el, clonedChild, isFirstOnPage));
+      });
+
+      const wMm = (cfg.widthPx * 25.4) / 96;
+      const hMm = (cfg.heightPx * 25.4) / 96;
+
+      let styleEl = document.getElementById('docium-print-page-styles') as HTMLStyleElement | null;
+      if (!styleEl) {
+        styleEl = document.createElement('style');
+        styleEl.id = 'docium-print-page-styles';
+        document.head.appendChild(styleEl);
+      }
+      styleEl.textContent = `
+        @media print {
+          @page {
+            size: ${wMm.toFixed(2)}mm ${hMm.toFixed(2)}mm;
+            margin: 0 !important;
+          }
+        }
+      `;
+
+      const portal = document.createElement('div');
+      portal.id = 'docium-print-pages';
+      const contPage = document.getElementById('docium-page-1');
+
+      for (let idx = 0; idx < totalPagesPrint; idx++) {
+        const pageNumber = idx + 1;
+        const pageDiv = document.createElement('div');
+        pageDiv.className = 'docium-print-page';
+        pageDiv.style.width = `${wMm.toFixed(2)}mm`;
+        pageDiv.style.height = `${hMm.toFixed(2)}mm`;
+        pageDiv.style.backgroundColor = cfg.effectivePaperBg;
+        pageDiv.style.position = 'relative';
+        pageDiv.style.overflow = 'hidden';
+        pageDiv.style.display = 'flex';
+        pageDiv.style.flexDirection = 'column';
+        pageDiv.style.justifyContent = 'flex-start';
+
+        // Layer 0 (behind text): Background & Watermark
+        const srcSheet =
+          cfg.isPaginatedView && sheetStackEl
+            ? (sheetStackEl.querySelector(`[data-page-number="${pageNumber}"]`) as HTMLElement | null)
+            : contPage;
+        if (srcSheet) {
+          const wmCloneRoot = document.createElement('div');
+          wmCloneRoot.style.position = 'absolute';
+          wmCloneRoot.style.inset = '0';
+          wmCloneRoot.style.zIndex = '0';
+          wmCloneRoot.style.pointerEvents = 'none';
+          const wmSpan = srcSheet.querySelector('span[style*="rotate("]');
+          if (wmSpan?.parentElement) {
+            wmCloneRoot.appendChild(wmSpan.parentElement.cloneNode(true));
+          }
+          pageDiv.appendChild(wmCloneRoot);
+        }
+
+        // Layer 1 (behind selectable text): Page Border
+        const srcBorder =
+          cfg.isPaginatedView && sheetStackEl
+            ? (sheetStackEl.querySelector(`[data-print-border="${pageNumber}"]`) as HTMLElement | null)
+            : (contPage?.querySelector('[data-print-border="1"]') as HTMLElement | null);
+        if (srcBorder) {
+          const bClone = srcBorder.cloneNode(true) as HTMLElement;
+          bClone.style.position = 'absolute';
+          bClone.style.top = '0';
+          bClone.style.left = '0';
+          bClone.style.width = '100%';
+          bClone.style.height = '100%';
+          bClone.style.zIndex = '1';
+          bClone.style.pointerEvents = 'none';
+          pageDiv.appendChild(bClone);
+        }
+
+        // Normal-flow Header (zIndex 2)
+        const srcHeader =
+          cfg.isPaginatedView && sheetStackEl
+            ? (sheetStackEl.querySelector(`[data-print-header="${pageNumber}"]`) as HTMLElement | null)
+            : (contPage?.querySelector('[data-print-header="1"]') as HTMLElement | null);
+        if (srcHeader) {
+          const hClone = srcHeader.cloneNode(true) as HTMLElement;
+          hClone.style.position = 'relative';
+          hClone.style.top = '';
+          hClone.style.left = '';
+          hClone.style.width = '100%';
+          hClone.style.height = `${cfg.headerHeightPx}px`;
+          hClone.style.flex = '0 0 auto';
+          hClone.style.zIndex = '2';
+          pageDiv.appendChild(hClone);
+        }
+
+        // Normal-flow Vector Selectable Body (ZERO CSS transform, ZERO overlapping clip mask)
+        const bodyWrap = document.createElement('div');
+        bodyWrap.className = 'docium-paper-content docium-print-body';
+        bodyWrap.style.flex = '1 1 auto';
+        bodyWrap.style.minHeight = '0';
+        bodyWrap.style.overflow = 'hidden';
+        bodyWrap.style.position = 'relative';
+        bodyWrap.style.zIndex = '2';
+        bodyWrap.style.paddingLeft = `${cfg.marginsLeftPx}px`;
+        bodyWrap.style.paddingRight = `${cfg.marginsRightPx}px`;
+        bodyWrap.style.color = '#171c19';
+        if (cfg.columnCount > 1) {
+          bodyWrap.style.columnCount = String(cfg.columnCount);
+          bodyWrap.style.columnGap = '28px';
+          bodyWrap.style.columnRule = '1px solid #d1d5db';
+        }
+
+        const tiptapInner = document.createElement('div');
+        tiptapInner.className = 'tiptap';
+        for (const nodeEl of pageBucketNodes[idx]) {
+          tiptapInner.appendChild(nodeEl);
+        }
+        bodyWrap.appendChild(tiptapInner);
+        pageDiv.appendChild(bodyWrap);
+
+        // Normal-flow Footer (zIndex 2)
+        const srcFooter =
+          cfg.isPaginatedView && sheetStackEl
+            ? (sheetStackEl.querySelector(`[data-print-footer="${pageNumber}"]`) as HTMLElement | null)
+            : (contPage?.querySelector('[data-print-footer="1"]') as HTMLElement | null);
+        if (srcFooter) {
+          const fClone = srcFooter.cloneNode(true) as HTMLElement;
+          fClone.style.position = 'relative';
+          fClone.style.top = '';
+          fClone.style.left = '';
+          fClone.style.width = '100%';
+          fClone.style.height = `${cfg.footerHeightPx}px`;
+          fClone.style.flex = '0 0 auto';
+          fClone.style.zIndex = '2';
+          pageDiv.appendChild(fClone);
+        }
+
+        portal.appendChild(pageDiv);
+      }
+
+      if (portal.childElementCount > 0) {
+        document.body.appendChild(portal);
+        document.body.classList.add('docium-printing');
+      }
+    };
+
+    window.addEventListener('beforeprint', handleBeforePrint);
+    window.addEventListener('afterprint', cleanupPrintPortal);
+    return () => {
+      window.removeEventListener('beforeprint', handleBeforePrint);
+      window.removeEventListener('afterprint', cleanupPrintPortal);
+      cleanupPrintPortal();
+    };
+  }, []);
 
   const startEditingHeader = (pageNumber: number) => {
     const isFirstPage = pageNumber === 1;
@@ -921,13 +1169,13 @@ export function PaginatedCanvas({
           e.stopPropagation();
           startEditingHeader(pageNumber);
         }}
-        className={`w-full flex items-end pb-2.5 text-[9.5pt] text-[#6b7280] select-none shrink-0 cursor-text transition-colors pointer-events-auto ${
-          hasHeaderContent ? 'border-b border-gray-200/80' : 'border-b border-transparent'
-        }`}
+        className="w-full flex items-end pb-1 text-[9.5pt] text-[#6b7280] select-none shrink-0 cursor-text transition-colors pointer-events-auto"
       >
         <div
           style={{ textAlign: headerAlign }}
-          className="w-full relative flex items-center"
+          className={`w-full relative flex items-center pb-1.5 transition-colors ${
+            showHeaderLine && hasHeaderContent ? 'border-b border-gray-200/80' : 'border-b border-transparent'
+          }`}
         >
           {hasHeaderContent ? (
             <span
@@ -1093,11 +1341,13 @@ export function PaginatedCanvas({
           e.stopPropagation();
           startEditingFooter(pageNumber);
         }}
-        className={`w-full flex items-start pt-2.5 text-[9.5pt] text-[#6b7280] select-none shrink-0 cursor-text transition-colors pointer-events-auto ${
-          hasFooterContent || showPageNumbers ? 'border-t border-gray-200/80' : 'border-t border-transparent'
-        }`}
+        className="w-full flex items-start pt-1 text-[9.5pt] text-[#6b7280] select-none shrink-0 cursor-text transition-colors pointer-events-auto"
       >
-        <div className="w-full flex items-center justify-between gap-2">
+        <div
+          className={`w-full flex items-center justify-between gap-2 pt-1.5 transition-colors ${
+            showFooterLine && (hasFooterContent || showPageNumbers) ? 'border-t border-gray-200/80' : 'border-t border-transparent'
+          }`}
+        >
           <div
             style={{ textAlign: footerAlign }}
             className="truncate flex-1 min-w-0"
@@ -1116,7 +1366,7 @@ export function PaginatedCanvas({
   };
 
   const totalPaginatedHeightPx =
-    pageCount * heightPx + Math.max(0, pageCount - 1) * PAGE_GAP_PX;
+    pageCount * heightPx + Math.max(0, pageCount - 1) * activeGapPx;
   const pageBorderStyle = getPageBorderOverlayStyle();
 
   return (
@@ -1130,7 +1380,7 @@ export function PaginatedCanvas({
           if (editingSection.type === 'footer') handleCommitFooter();
         }
       }}
-      className={`flex-1 overflow-y-auto overflow-x-auto p-4 sm:p-8 bg-[var(--background)] transition-colors select-text ${
+      className={`docium-canvas-scroller flex-1 overflow-y-auto overflow-x-auto p-4 sm:p-8 bg-[var(--background)] transition-colors select-text ${
         showFormattingMarks ? 'show-formatting-marks' : ''
       }`}
     >
@@ -1139,9 +1389,9 @@ export function PaginatedCanvas({
           width: `${Math.round(widthPx * scale)}px`,
           minWidth: `${Math.round(widthPx * scale)}px`,
           margin: '0 auto',
-          padding: '16px 0',
+          padding: isPrinting ? '0' : '16px 0',
         }}
-        className="flex flex-col items-center"
+        className="docium-zoom-frame flex flex-col items-center"
       >
         <div
           style={{
@@ -1150,7 +1400,7 @@ export function PaginatedCanvas({
             transformOrigin: 'top center',
             transition: 'transform 0.15s ease-out',
           }}
-          className="flex flex-col items-center"
+          className="docium-zoom-scaler flex flex-col items-center"
         >
           {isPaginatedView ? (
             <div
@@ -1233,6 +1483,7 @@ export function PaginatedCanvas({
                   return (
                     <React.Fragment key={`sheet-chrome-${pageNumber}`}>
                       <div
+                        data-print-header={pageNumber}
                         style={{
                           position: 'absolute',
                           top: `${pageTopPx}px`,
@@ -1246,6 +1497,7 @@ export function PaginatedCanvas({
                       </div>
 
                       <div
+                        data-print-footer={pageNumber}
                         style={{
                           position: 'absolute',
                           top: `${footerTopPx}px`,
@@ -1260,6 +1512,7 @@ export function PaginatedCanvas({
 
                       {pageBorderStyle && (
                         <div
+                          data-print-border={pageNumber}
                           style={{
                             position: 'absolute',
                             top: `${pageTopPx}px`,
@@ -1273,7 +1526,7 @@ export function PaginatedCanvas({
                         </div>
                       )}
 
-                      {idx < pageCount - 1 && (
+                      {!isPrinting && idx < pageCount - 1 && (
                         <div
                           style={{
                             position: 'absolute',
@@ -1326,7 +1579,7 @@ export function PaginatedCanvas({
                   </span>
                 </div>
               )}
-              {renderHeaderArea(1)}
+              <div data-print-header="1">{renderHeaderArea(1)}</div>
 
               <div
                 ref={contentWrapperRef}
@@ -1341,8 +1594,8 @@ export function PaginatedCanvas({
                 <EditorContent editor={editor} />
               </div>
 
-              {renderFooterArea(1)}
-              {pageBorderStyle && <div style={pageBorderStyle} />}
+              <div data-print-footer="1">{renderFooterArea(1)}</div>
+              {pageBorderStyle && <div data-print-border="1" style={pageBorderStyle} />}
             </div>
           )}
         </div>

@@ -13,7 +13,7 @@ import { assertWorkspaceBoundary } from '../security/workspaceBoundary';
 export const readPdfPageTool: ToolDefinition = {
   name: 'read_pdf_page',
   label: 'Read PDF Page',
-  description: 'Read the extracted text and metadata of a specific PDF page.',
+  description: 'Read extracted text, page range, and visual page flags (isImageOnly, hasEmbeddedImages) of specific PDF page(s).',
   activityLabel: 'Reading PDF page',
   parameters: {
     type: 'object',
@@ -24,13 +24,21 @@ export const readPdfPageTool: ToolDefinition = {
       },
       pageNumber: {
         type: 'number',
-        description: '1-based page number to inspect.',
+        description: '1-based start page number to inspect.',
+      },
+      endPageNumber: {
+        type: 'number',
+        description: 'Optional inclusive end page number to read multiple consecutive pages at once (max 8 pages per call).',
       },
     },
     required: ['pageNumber'],
   },
   execute: async (args, context?: ToolExecutionContext) => {
-    const pageNum = typeof args.pageNumber === 'number' && args.pageNumber > 0 ? args.pageNumber : 1;
+    const startPage = typeof args.pageNumber === 'number' && args.pageNumber > 0 ? Math.floor(args.pageNumber) : 1;
+    const endPage =
+      typeof args.endPageNumber === 'number' && args.endPageNumber >= startPage
+        ? Math.min(Math.floor(args.endPageNumber), startPage + 7)
+        : startPage;
     const wsId = context?.workspaceId || '';
     const rawTarget = String(args.pdfId || args.sourceId || '').trim();
 
@@ -52,28 +60,54 @@ export const readPdfPageTool: ToolDefinition = {
     if (stored && stored.buffer && isPdfBuffer(stored.buffer)) {
       const analysis = await extractPdfDocument(stored.buffer, stored.filename);
       if (analysis.success && analysis.totalPages > 0) {
-        const pageIdx = pageNum - 1;
-        const page = analysis.pages[pageIdx];
+        const clampedEnd = Math.min(endPage, analysis.totalPages);
+        const startIdx = startPage - 1;
+        const firstPage = analysis.pages[startIdx];
 
-        if (!page) {
+        if (!firstPage) {
           return {
             success: false,
-            error: `Page ${pageNum} out of range. Document "${stored.filename}" has ${analysis.totalPages} pages.`,
+            error: `Page ${startPage} out of range. Document "${stored.filename}" has ${analysis.totalPages} pages.`,
           };
         }
+
+        const slicePages = analysis.pages.slice(startIdx, clampedEnd);
+        const combinedContent =
+          slicePages.length === 1
+            ? slicePages[0].text || '[Visual / Image-only page — call inspect_source_image with this page number]'
+            : slicePages
+                .map(
+                  (p) =>
+                    `--- Page ${p.pageNumber} ---\n${p.text || '[Visual / Image-only page — call inspect_source_image]'}`
+                )
+                .join('\n\n');
 
         return {
           success: true,
           data: {
             pdfTitle: analysis.title || stored.filename,
             sourceId: stored.sourceId,
-            pageNumber: pageNum,
+            pageNumber: startPage,
+            endPageNumber: clampedEnd,
             totalPages: analysis.totalPages,
-            content: page.text || '[Visual / Image-only page — no native text]',
-            charCount: page.charCount,
-            isImageOnly: page.isImageOnly,
+            content: combinedContent,
+            charCount: slicePages.reduce((acc, p) => acc + p.charCount, 0),
+            isImageOnly: slicePages.some((p) => p.isImageOnly),
+            hasEmbeddedImages: slicePages.some((p) => p.hasEmbeddedImages),
+            needsVisualInspection: slicePages.some((p) => p.needsVisualInspection),
+            visualPages: analysis.visualPages,
+            pagesMetadata: slicePages.map((p) => ({
+              pageNumber: p.pageNumber,
+              charCount: p.charCount,
+              isImageOnly: p.isImageOnly,
+              embeddedImageCount: p.embeddedImageCount || 0,
+              needsVisualInspection: Boolean(p.needsVisualInspection),
+            })),
           },
-          activitySummary: `Read Page ${pageNum} of "${analysis.title || stored.filename}"`,
+          activitySummary:
+            slicePages.length > 1
+              ? `Read Pages ${startPage}-${clampedEnd} of "${analysis.title || stored.filename}"`
+              : `Read Page ${startPage} of "${analysis.title || stored.filename}"`,
         };
       }
     }
@@ -84,8 +118,8 @@ export const readPdfPageTool: ToolDefinition = {
         (s) => s.id.toLowerCase() === targetId.toLowerCase() || s.title.toLowerCase().includes(targetId.toLowerCase())
       );
       if (src && src.extractedText) {
-        const pageTag = `--- Page ${pageNum} ---`;
-        const nextTag = `--- Page ${pageNum + 1} ---`;
+        const pageTag = `--- Page ${startPage} ---`;
+        const nextTag = `--- Page ${endPage + 1} ---`;
         let text = src.extractedText;
         const start = text.indexOf(pageTag);
         if (start !== -1) {
@@ -97,12 +131,14 @@ export const readPdfPageTool: ToolDefinition = {
           data: {
             pdfTitle: src.title,
             sourceId: src.id,
-            pageNumber: pageNum,
-            totalPages: (src as any).pageCount || 1,
+            pageNumber: startPage,
+            endPageNumber: endPage,
+            totalPages: src.pageCount || 1,
+            visualPages: src.visualPages,
             content: text,
             isImageOnly: text.length < 40,
           },
-          activitySummary: `Read Page ${pageNum} of "${src.title}"`,
+          activitySummary: `Read Page ${startPage}${endPage > startPage ? `-${endPage}` : ''} of "${src.title}"`,
         };
       }
     }
@@ -110,20 +146,20 @@ export const readPdfPageTool: ToolDefinition = {
     // 4. Sample PDF fallback
     const pdf = SAMPLE_PDFS[0];
     const sampleText =
-      pageNum === 1
+      startPage === 1
         ? `Executive Summary & Multimodal AI Framework\nModern enterprise knowledge management requires unified semantic pipelines across text and visuals.`
-        : `Page ${pageNum}: Performance Analysis & System Reliability\nSystem latency benchmarks demonstrated sub-15ms throughput under concurrent load.`;
+        : `Page ${startPage}: Performance Analysis & System Reliability\nSystem latency benchmarks demonstrated sub-15ms throughput under concurrent load.`;
 
     return {
       success: true,
       data: {
         pdfTitle: pdf.title,
-        pageNumber: pageNum,
+        pageNumber: startPage,
         totalPages: pdf.pageCount || 12,
         content: sampleText,
         annotationsCount: pdf.annotations?.length || 0,
       },
-      activitySummary: `Read Page ${pageNum} of "${pdf.title}"`,
+      activitySummary: `Read Page ${startPage} of "${pdf.title}"`,
     };
   },
 };

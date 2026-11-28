@@ -15,9 +15,10 @@
 
 import { ToolExecutionContext, ToolResult } from './types';
 import { NormalizedToolDefinition } from '../adapters/base';
-import { searchRelevantChunks } from '../embeddings';
+import { searchRelevantChunks, calculateKeywordScore } from '../embeddings';
 import { editorRegistry } from '@/lib/editor/editorRegistry';
 import { searchProseMirrorDoc, findSectionByHeading } from '@/lib/editor/documentSearch';
+import { validateActionAgainstActiveDoc } from '@/lib/editor/shadowDocEngine';
 import { SUPPORTED_FONT_FAMILIES, SUPPORTED_FONT_SIZES } from '@/lib/editor/capabilityRegistry';
 import { useWorkspaceStore } from '@/lib/store';
 import { assertWorkspaceBoundary, WorkspaceSecurityViolationError } from '../security/workspaceBoundary';
@@ -26,6 +27,8 @@ import { getOriginalFile } from '@/lib/storage/sourceStorage';
 import { executeVisionInspection, VisionImageInput } from '../vision/visionRunner';
 import { normalizeBase64DataUrl } from '../adapters/cloudflare';
 import { extractPdfDocument, renderPdfPageToImage, isPdfBuffer } from '../pdf/pdfService';
+import { inspectSourceStyles } from '../styles/styleInspector';
+import { hydrateWorkspaceIndexes } from '../serverIndexBridge';
 
 export type ToolRisk = 'read_only' | 'modifying' | 'destructive';
 export type ToolAvailability = 'implemented' | 'planned' | 'deprecated';
@@ -158,6 +161,11 @@ export const searchToolCatalogTool: ToolCatalogEntry = {
         if (t.id === 'insert_image') {
           score -= 50; // De-prioritize image embedding when user asked for text content extraction
         }
+      }
+
+      // Special Intent Boost: Inspecting attached file styling / design tokens
+      if (/\b(style|styling|theme|font|color|palette|margin|margins|layout|template|design|match|replicate)\b/i.test(rawQuery)) {
+        if (t.id === 'inspect_source_styles') score += 110;
       }
 
       if (rawQuery) {
@@ -465,7 +473,13 @@ export const getSourceDetailsTool: ToolCatalogEntry = {
           fileSize: attached.fileSize,
           status: attached.status,
           chunkCount: attached.chunkCount || 1,
+          pageCount: attached.pageCount,
+          slideCount: attached.slideCount,
+          sheetNames: attached.sheetNames,
+          visualPages: attached.visualPages,
+          outline: attached.outline,
           hasExtractedText: Boolean(attached.extractedText),
+          imageCards: attached.imageCards,
           previewSnippet: attached.snippet || (attached.extractedText ? attached.extractedText.slice(0, 300) : undefined),
           sourceScope: 'attached',
         },
@@ -534,7 +548,15 @@ export const searchSourcesTool: ToolCatalogEntry = {
     // Enforce strict workspace isolation boundary on search query
     assertWorkspaceBoundary(query, context, 'search_sources');
 
-    const results = await searchRelevantChunks(query, context.workspaceId, limit);
+    // Hydrate persisted vector chunks & image cards from disk on cold start / server reload
+    hydrateWorkspaceIndexes(context.workspaceId);
+
+    const activeSourceIds = new Set((context.attachedSources || []).map((s) => s.id));
+    const rawResults = await searchRelevantChunks(query, context.workspaceId, Math.max(limit * 2, 8));
+    const results = (activeSourceIds.size > 0
+      ? rawResults.filter((r) => activeSourceIds.has(r.chunk.sourceId))
+      : rawResults
+    ).slice(0, limit);
 
     if (results.length > 0) {
       const formatted = results.map((r) => ({
@@ -542,7 +564,10 @@ export const searchSourcesTool: ToolCatalogEntry = {
         sourceTitle: r.sourceTitle,
         heading: r.chunk.heading,
         page: r.chunk.page,
+        contentType: r.chunk.contentType,
+        hasVisuals: Boolean(r.associatedImages && r.associatedImages.length > 0) || r.chunk.contentType === 'image_description',
         snippet: r.chunk.text,
+        score: Number(r.score.toFixed(3)),
       }));
       return {
         success: true,
@@ -551,27 +576,40 @@ export const searchSourcesTool: ToolCatalogEntry = {
       };
     }
 
-    // Direct text search fallback
-    const fallbackMatches: Array<{ sourceTitle: string; snippet: string; score: number }> = [];
-    const lowerQ = query.toLowerCase();
+    // Windowed keyword scoring fallback across attachedSources
+    const fallbackMatches: Array<{ sourceId: string; sourceTitle: string; snippet: string; score: number }> = [];
 
     for (const src of context.attachedSources || []) {
       const text = src.extractedText || src.snippet || '';
-      const idx = text.toLowerCase().indexOf(lowerQ);
-      if (idx !== -1) {
-        const start = Math.max(0, idx - 100);
+      if (!text) continue;
+      // Slide 500-char windows to score multi-term matches accurately
+      let bestScore = 0;
+      let bestSnippet = '';
+      for (let pos = 0; pos < text.length; pos += 350) {
+        const win = text.slice(pos, pos + 550);
+        const s = calculateKeywordScore(query, win, src.title);
+        if (s > bestScore) {
+          bestScore = s;
+          bestSnippet = win;
+        }
+        if (pos > 25000) break;
+      }
+      if (bestScore >= 0.25 && bestSnippet) {
         fallbackMatches.push({
+          sourceId: src.id,
           sourceTitle: src.title,
-          snippet: text.slice(start, start + 350),
-          score: 0.85,
+          snippet: bestSnippet.trim(),
+          score: Number(bestScore.toFixed(3)),
         });
       }
     }
+    fallbackMatches.sort((a, b) => b.score - a.score);
+    const slicedFallback = fallbackMatches.slice(0, limit);
 
     return {
       success: true,
-      data: { query, results: fallbackMatches, count: fallbackMatches.length },
-      activitySummary: `Found ${fallbackMatches.length} matching sections in sources`,
+      data: { query, results: slicedFallback, count: slicedFallback.length },
+      activitySummary: `Found ${slicedFallback.length} matching sections in sources`,
     };
   },
 };
@@ -607,7 +645,11 @@ export const readSourceContentTool: ToolCatalogEntry = {
       },
       page: {
         type: 'number',
-        description: 'Optional page number for paginated documents (PDF, slides).',
+        description: 'Optional start page number for paginated documents (PDF, slides).',
+      },
+      endPage: {
+        type: 'number',
+        description: 'Optional inclusive end page number for reading multiple consecutive PDF pages (max 8 pages).',
       },
       section: {
         type: 'string',
@@ -647,29 +689,50 @@ export const readSourceContentTool: ToolCatalogEntry = {
         const title = stored.filename || source?.title || args.sourceId;
 
         if (typeof args.page === 'number') {
-          const pageIdx = args.page - 1;
-          const page = pdfAnalysis.pages[pageIdx];
-          if (!page) {
+          const startPage = Math.max(1, Math.floor(args.page));
+          const endPage =
+            typeof args.endPage === 'number' && args.endPage >= startPage
+              ? Math.min(Math.floor(args.endPage), startPage + 7, pdfAnalysis.totalPages)
+              : startPage;
+          const firstPage = pdfAnalysis.pages[startPage - 1];
+          if (!firstPage) {
             return {
               success: false,
-              error: `Page ${args.page} out of range for "${title}". Total pages: ${pdfAnalysis.totalPages}.`,
+              error: `Page ${startPage} out of range for "${title}". Total pages: ${pdfAnalysis.totalPages}.`,
             };
           }
 
-          const pageText = page.text || '[Visual page / No native text extracted]';
+          const slicePages = pdfAnalysis.pages.slice(startPage - 1, endPage);
+          const pageText =
+            slicePages.length === 1
+              ? slicePages[0].text || '[Visual page / No native text extracted — call inspect_source_image with this page]'
+              : slicePages
+                  .map(
+                    (p) =>
+                      `--- Page ${p.pageNumber} ---\n${p.text || '[Visual page / No native text extracted]'}`
+                  )
+                  .join('\n\n');
+
           return {
             success: true,
             data: {
               sourceId: stored.sourceId,
               title,
-              pageNumber: args.page,
+              pageNumber: startPage,
+              endPageNumber: endPage,
               totalPages: pdfAnalysis.totalPages,
               text: pageText,
-              charCount: page.charCount,
-              isImageOnly: page.isImageOnly,
+              charCount: slicePages.reduce((acc, p) => acc + p.charCount, 0),
+              isImageOnly: slicePages.some((p) => p.isImageOnly),
+              hasEmbeddedImages: slicePages.some((p) => p.hasEmbeddedImages),
+              needsVisualInspection: slicePages.some((p) => p.needsVisualInspection),
+              visualPages: pdfAnalysis.visualPages,
               returnedLength: pageText.length,
             },
-            activitySummary: `Read Page ${args.page} of "${title}"`,
+            activitySummary:
+              endPage > startPage
+                ? `Read Pages ${startPage}-${endPage} of "${title}"`
+                : `Read Page ${startPage} of "${title}"`,
           };
         }
 
@@ -685,6 +748,8 @@ export const readSourceContentTool: ToolCatalogEntry = {
             totalPages: pdfAnalysis.totalPages,
             hasNativeText: pdfAnalysis.hasNativeText,
             imageOnlyPagesCount: pdfAnalysis.imageOnlyPageCount,
+            hybridVisualPagesCount: pdfAnalysis.hybridVisualPageCount || 0,
+            visualPages: pdfAnalysis.visualPages || [],
             text: textToReturn,
             returnedLength: textToReturn.length,
             totalLength: pdfAnalysis.fullText.length,
@@ -716,8 +781,9 @@ export const readSourceContentTool: ToolCatalogEntry = {
     let contentToReturn = fullText;
 
     if (typeof args.page === 'number') {
-      const pageTag = `[Page ${args.page}]`;
-      const pageIdx = fullText.indexOf(pageTag);
+      const dashTag = `--- Page ${args.page} ---`;
+      const bracketTag = `[Page ${args.page}]`;
+      const pageIdx = fullText.indexOf(dashTag) !== -1 ? fullText.indexOf(dashTag) : fullText.indexOf(bracketTag);
       if (pageIdx !== -1) {
         contentToReturn = fullText.slice(pageIdx, pageIdx + maxChars);
       } else {
@@ -748,6 +814,8 @@ export const readSourceContentTool: ToolCatalogEntry = {
     };
   },
 };
+
+const visionInspectionCache = new Map<string, ToolResult>();
 
 export const inspectSourceImageTool: ToolCatalogEntry = {
   id: 'inspect_source_image',
@@ -848,7 +916,7 @@ export const inspectSourceImageTool: ToolCatalogEntry = {
       if (storedFile && storedFile.buffer && storedFile.buffer.length > 0) {
         if (isPdfBuffer(storedFile.buffer) || storedFile.mimeType === 'application/pdf') {
           const pageNum = typeof args.page === 'number' && args.page > 0 ? args.page : 1;
-          const rendered = await renderPdfPageToImage(storedFile.buffer, pageNum, { format: 'png' });
+          const rendered = await renderPdfPageToImage(storedFile.buffer, pageNum, { format: 'jpeg', scale: 1.25 });
           if (!rendered.success) {
             return {
               success: false,
@@ -904,7 +972,7 @@ export const inspectSourceImageTool: ToolCatalogEntry = {
           const pdfStored = getOriginalFile(context.workspaceId, source.id) || getOriginalFile(context.workspaceId, source.title);
           if (pdfStored && pdfStored.buffer && isPdfBuffer(pdfStored.buffer)) {
             const pageNum = typeof args.page === 'number' && args.page > 0 ? args.page : 1;
-            const rendered = await renderPdfPageToImage(pdfStored.buffer, pageNum, { format: 'png' });
+            const rendered = await renderPdfPageToImage(pdfStored.buffer, pageNum, { format: 'jpeg', scale: 1.25 });
             if (!rendered.success) {
               return {
                 success: false,
@@ -1054,6 +1122,11 @@ export const inspectSourceImageTool: ToolCatalogEntry = {
 
     const primaryImage = resolvedImages[0];
     const userPrompt = String(args.prompt || '').trim();
+    const cacheKey = `${context.workspaceId}::${resolvedImages.map((i) => i.sourceId).join(',')}::${args.page || 0}::${userPrompt.toLowerCase().slice(0, 120)}`;
+    const cachedInspection = visionInspectionCache.get(cacheKey);
+    if (cachedInspection) {
+      return cachedInspection;
+    }
 
     // 5. Invoke vision intelligence model
     if (context.providerId && context.apiKey) {
@@ -1066,6 +1139,7 @@ export const inspectSourceImageTool: ToolCatalogEntry = {
         workspaceId: context.workspaceId,
         requestId: context.requestId,
         toolCallId: context.toolCallId,
+        signal: context.abortSignal,
       });
 
       if (!visionRes.success) {
@@ -1078,7 +1152,7 @@ export const inspectSourceImageTool: ToolCatalogEntry = {
       }
 
       const analysis = visionRes.analysis!;
-      return {
+      const okResult: ToolResult = {
         success: true,
         status: 'inspected',
         sourceId: primaryImage.sourceId,
@@ -1096,6 +1170,12 @@ export const inspectSourceImageTool: ToolCatalogEntry = {
         },
         activitySummary: `Inspected image "${primaryImage.filename}" and extracted text`,
       };
+      if (visionInspectionCache.size > 40) {
+        const firstKey = visionInspectionCache.keys().next().value;
+        if (firstKey) visionInspectionCache.delete(firstKey);
+      }
+      visionInspectionCache.set(cacheKey, okResult);
+      return okResult;
     }
 
     // 6. Test / Offline / Fallback execution when no provider credentials exist in context (e.g. unit tests)
@@ -1124,6 +1204,117 @@ export const inspectSourceImageTool: ToolCatalogEntry = {
         accessibleToVisionModel: true,
       },
       activitySummary: `Inspected image "${primaryImage.filename}" and extracted text`,
+    };
+  },
+};
+
+export const inspectSourceStylesTool: ToolCatalogEntry = {
+  id: 'inspect_source_styles',
+  name: 'inspect_source_styles',
+  label: 'Inspect Attached File Styles',
+  description:
+    'Extract exact typography (fonts, point sizes, heading hierarchy, line spacing), color palette (primary, accent, text, background, table header/stripe fills, quote borders), margins, page size, and orientation from an attached source file (.docx, .pdf, .html, or image).',
+  category: 'source_reading',
+  workspace: ['universal', 'chat', 'doc'],
+  risk: 'read_only',
+  availability: 'implemented',
+  aliases: [
+    'get_source_styles',
+    'extract_file_styles',
+    'inspect_document_styling',
+    'match_source_style',
+    'get_attached_file_styles',
+  ],
+  keywords: [
+    'style',
+    'styling',
+    'styles',
+    'theme',
+    'font',
+    'fonts',
+    'color',
+    'colors',
+    'palette',
+    'margin',
+    'margins',
+    'layout',
+    'design',
+    'template',
+    'match',
+    'replicate',
+    'docx',
+    'pdf',
+  ],
+  parameters: {
+    type: 'object',
+    properties: {
+      sourceId: {
+        type: 'string',
+        description: 'Source ID or filename of the attached file whose styling should be extracted.',
+      },
+      pages: {
+        type: 'array',
+        items: { type: 'number' },
+        description: 'Optional 1-based sample page numbers for PDF style inspection (defaults to [1, 2]).',
+      },
+    },
+  },
+  execute: async (args, context) => {
+    let rawTarget = typeof args.sourceId === 'string' ? args.sourceId.trim() : '';
+    if (!rawTarget && context.attachedSources && context.attachedSources.length > 0) {
+      const styleCandidate =
+        context.attachedSources.find((s) => s.type === 'docx' || s.type === 'pdf' || s.mimeType?.includes('html')) ||
+        context.attachedSources[0];
+      rawTarget = styleCandidate.id;
+    }
+
+    if (!rawTarget) {
+      return {
+        success: false,
+        error: 'sourceId is required, and no attached file was found in the current workspace.',
+      };
+    }
+
+    assertWorkspaceBoundary(rawTarget, context, 'inspect_source_styles');
+
+    const matchedSource = (context.attachedSources || []).find(
+      (s) =>
+        s.id.toLowerCase() === rawTarget.toLowerCase() ||
+        s.title.toLowerCase() === rawTarget.toLowerCase() ||
+        s.title.toLowerCase().includes(rawTarget.toLowerCase())
+    );
+
+    const samplePages = Array.isArray(args.pages)
+      ? args.pages.map((n) => Number(n)).filter((n) => Number.isFinite(n) && n > 0)
+      : undefined;
+
+    const styleResult = await inspectSourceStyles({
+      workspaceId: context.workspaceId,
+      sourceId: matchedSource?.id || rawTarget,
+      sourceTitle: matchedSource?.title,
+      mimeType: matchedSource?.mimeType,
+      pages: samplePages,
+      visionAuth: {
+        providerId: context.providerId,
+        modelId: context.modelId,
+        apiKey: context.apiKey,
+        baseUrl: context.baseUrl,
+        accountId: context.accountId,
+      },
+    });
+
+    if (!styleResult.success) {
+      return {
+        success: false,
+        error: styleResult.error || `Unable to extract styling from "${rawTarget}".`,
+        activitySummary: `Style inspection failed for "${rawTarget}"`,
+      };
+    }
+
+    return {
+      success: true,
+      data: styleResult,
+      activitySummary: `Extracted ${styleResult.sourceType.toUpperCase()} styling (${styleResult.extractionMethod}) from "${styleResult.title}"`,
     };
   },
 };
@@ -1300,6 +1491,13 @@ export const readDocumentContentTool: ToolCatalogEntry = {
     const liveEditor = editorRegistry.getEditor(doc.id);
     const stripHtmlToText = (html: string): string =>
       html
+        .replace(/<img\b([^>]*)>/gi, (_m, attrs) => {
+          const isDiag = /data-diagram=/i.test(attrs);
+          const isChart = /data-chart=/i.test(attrs);
+          const alt = attrs.match(/alt=["']([^"']*)["']/i)?.[1] || attrs.match(/title=["']([^"']*)["']/i)?.[1] || '';
+          const tag = isDiag ? 'Diagram' : isChart ? 'Chart' : 'Image';
+          return alt ? `\n[${tag}: ${alt}]\n` : `\n[${tag}]\n`;
+        })
         .replace(/<\/(p|h[1-6]|li|tr|div|pre|blockquote)>/gi, '\n')
         .replace(/<br\s*\/?>/gi, '\n')
         .replace(/<[^>]+>/g, '')
@@ -1481,7 +1679,8 @@ export const findDocumentContentTool: ToolCatalogEntry = {
       .replace(/&#39;/gi, "'");
 
     const escaped = query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const pattern = matchWholeWord ? `\\b${escaped}\\b` : escaped;
+    const flexPattern = escaped.trim().split(/\s+/).filter(Boolean).join('[\\s\\u00a0]+') || escaped;
+    const pattern = matchWholeWord ? `\\b${flexPattern}\\b` : flexPattern;
     const regex = new RegExp(pattern, caseSensitive ? 'g' : 'gi');
     const matches: Array<{ matchIndex: number; from: number; to: number; snippet: string }> = [];
     let m: RegExpExecArray | null;
@@ -1519,7 +1718,7 @@ export const insertTextTool: ToolCatalogEntry = {
   id: 'insert_text',
   name: 'insert_text',
   label: 'Insert Text',
-  description: 'Insert text or structured markdown at a specified editor position or content anchor in the active document.',
+  description: 'Insert text or structured markdown/LaTeX at a specified editor position, anchor, or replacing target content in the active document.',
   category: 'content_editing',
   workspace: ['doc'],
   risk: 'modifying',
@@ -1538,16 +1737,44 @@ export const insertTextTool: ToolCatalogEntry = {
     properties: {
       text: {
         type: 'string',
-        description: 'Text or Markdown content to insert into the document.',
+        description: 'Text or Markdown/LaTeX content to insert into the document.',
       },
       position: {
         type: 'string',
-        enum: ['cursor', 'start', 'end', 'after_heading'],
+        enum: ['cursor', 'start', 'end', 'after_heading', 'afterHeading', 'beforeHeading', 'afterText', 'beforeText', 'replaceTarget'],
         description: 'Insertion position (defaults to "cursor").',
       },
       afterHeading: {
         type: 'string',
         description: 'Heading title to insert content immediately after.',
+      },
+      beforeHeading: {
+        type: 'string',
+        description: 'Heading title to insert content immediately before.',
+      },
+      afterText: {
+        type: 'string',
+        description: 'Existing text snippet to insert immediately after.',
+      },
+      beforeText: {
+        type: 'string',
+        description: 'Existing text snippet to insert immediately before.',
+      },
+      replaceTargetText: {
+        type: 'string',
+        description: 'Optional existing text/phrase to replace in-place with this content.',
+      },
+      replaceStartText: {
+        type: 'string',
+        description: 'Optional starting anchor of a multi-line range to replace.',
+      },
+      replaceEndText: {
+        type: 'string',
+        description: 'Optional ending anchor of a multi-line range to replace.',
+      },
+      replaceBlockContaining: {
+        type: 'string',
+        description: 'Optional snippet inside a block/codeBlock to replace in-place.',
       },
     },
     required: ['text'],
@@ -1560,9 +1787,17 @@ export const insertTextTool: ToolCatalogEntry = {
     if (!docId) return { success: false, error: 'No active document loaded.' };
 
     const pos = (args.position as string) || (args.afterHeading ? 'after_heading' : 'cursor');
-    const action = pos === 'after_heading'
+    const hasCustomAnchor = Boolean(
+      args.beforeHeading ||
+      args.afterText ||
+      args.beforeText ||
+      args.replaceTargetText ||
+      args.replaceStartText ||
+      args.replaceBlockContaining
+    );
+    const action = !hasCustomAnchor && pos === 'after_heading'
       ? 'append_or_insert_paragraph'
-      : pos === 'start'
+      : !hasCustomAnchor && pos === 'start'
       ? 'prepend_to_document'
       : 'insert_structured_document';
 
@@ -1571,11 +1806,28 @@ export const insertTextTool: ToolCatalogEntry = {
       text,
       position: pos,
       afterHeading: args.afterHeading,
+      beforeHeading: args.beforeHeading,
+      afterText: args.afterText,
+      beforeText: args.beforeText,
+      replaceTargetText: args.replaceTargetText,
+      replaceStartText: args.replaceStartText,
+      replaceEndText: args.replaceEndText,
+      replaceBlockContaining: args.replaceBlockContaining,
       documentId: docId,
     };
 
+    if (typeof window === 'undefined' && context.activeDocument) {
+      const check = validateActionAgainstActiveDoc(context.activeDocument, action, payload);
+      if (!check.ok) return { success: false, error: check.error };
+    }
+
     const actionId = `act-ins-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
     const summary = `Inserted "${text.length > 30 ? text.slice(0, 30) + '...' : text}" into active document`;
+
+    const result = await editorRegistry.executeAction(action, payload, docId);
+    if (!result.success) {
+      return { success: false, error: result.error || 'Failed to insert text.' };
+    }
 
     if (context.onEditorAction) {
       await context.onEditorAction({
@@ -1585,8 +1837,6 @@ export const insertTextTool: ToolCatalogEntry = {
         summary,
       });
     }
-
-    const result = await editorRegistry.executeAction(action, payload, docId);
 
     return {
       success: true,
@@ -1607,7 +1857,7 @@ export const replaceTextTool: ToolCatalogEntry = {
   id: 'replace_text',
   name: 'replace_text',
   label: 'Replace Text',
-  description: 'Replace matching text within an explicitly resolved scope or match index in the active document.',
+  description: 'Replace matching text (supports inline formatted runs, multi-line phrases, and Markdown/LaTeX/HTML replacements) in the active document.',
   category: 'content_editing',
   workspace: ['doc'],
   risk: 'modifying',
@@ -1621,7 +1871,7 @@ export const replaceTextTool: ToolCatalogEntry = {
       },
       replaceText: {
         type: 'string',
-        description: 'New replacement text.',
+        description: 'New replacement text, Markdown, or HTML (empty string "" deletes the match).',
       },
       matchIndex: {
         type: 'number',
@@ -1634,6 +1884,10 @@ export const replaceTextTool: ToolCatalogEntry = {
       matchWholeWord: {
         type: 'boolean',
         description: 'Whether matching must match complete words.',
+      },
+      plainTextOnly: {
+        type: 'boolean',
+        description: 'Set true to force unparsed plain string insertion.',
       },
     },
     required: ['findText', 'replaceText'],
@@ -1652,11 +1906,22 @@ export const replaceTextTool: ToolCatalogEntry = {
       matchIndex: args.matchIndex,
       caseSensitive: args.caseSensitive,
       matchWholeWord: args.matchWholeWord,
+      plainTextOnly: args.plainTextOnly,
       documentId: docId,
     };
 
+    if (typeof window === 'undefined' && context.activeDocument) {
+      const check = validateActionAgainstActiveDoc(context.activeDocument, 'find_and_replace_text', payload);
+      if (!check.ok) return { success: false, error: check.error };
+    }
+
     const actionId = `act-rep-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
-    const summary = `Replaced "${findText}" with "${replaceText}" in active document`;
+    const summary = `Replaced "${findText.slice(0, 40)}" in active document`;
+
+    const result = await editorRegistry.executeAction('find_and_replace_text', payload, docId);
+    if (!result.success) {
+      return { success: false, error: result.error || 'Failed to replace text.' };
+    }
 
     if (context.onEditorAction) {
       await context.onEditorAction({
@@ -1666,8 +1931,6 @@ export const replaceTextTool: ToolCatalogEntry = {
         summary,
       });
     }
-
-    const result = await editorRegistry.executeAction('find_and_replace_text', payload, docId);
 
     return {
       success: true,
@@ -1683,11 +1946,162 @@ export const replaceTextTool: ToolCatalogEntry = {
   },
 };
 
+export const replaceContentTool: ToolCatalogEntry = {
+  id: 'replace_content',
+  name: 'replace_content',
+  label: 'Replace or Remove Content',
+  description:
+    'Flexibly delete or replace any content on the page (exact/multi-line text, startText..endText range, any block like codeBlock/paragraph/table/blockquote/shape/textBox/image, or section) with Markdown, LaTeX, HTML, a Mermaid diagram, or "" to delete.',
+  category: 'content_editing',
+  workspace: ['doc'],
+  risk: 'modifying',
+  availability: 'implemented',
+  aliases: [
+    'replace block',
+    'replace diagram',
+    'replace code block',
+    'delete range',
+    'replace range',
+    'replace any content',
+  ],
+  keywords: ['replace', 'remove', 'delete', 'range', 'anchor', 'startText', 'endText', 'codeBlock', 'block', 'diagram'],
+  parameters: {
+    type: 'object',
+    properties: {
+      targetText: {
+        type: 'string',
+        description: 'Exact or multi-line phrase to target (matches across inline formatting and line breaks).',
+      },
+      startText: {
+        type: 'string',
+        description: 'Starting anchor phrase of a span/diagram/block to replace or delete.',
+      },
+      endText: {
+        type: 'string',
+        description: 'Optional ending anchor phrase marking the end of the range starting at startText.',
+      },
+      blockType: {
+        type: 'string',
+        enum: ['any', 'paragraph', 'codeBlock', 'blockquote', 'table', 'callout', 'image', 'shape', 'textBox', 'list', 'heading'],
+        description: 'Optional block node type when targeting a specific block.',
+      },
+      containsText: {
+        type: 'string',
+        description: 'Text snippet inside the target block (used with or without blockType).',
+      },
+      blockIndex: {
+        type: 'number',
+        description: 'Optional 0-based index of matching block.',
+      },
+      headingTitle: {
+        type: 'string',
+        description: 'Optional section heading title to target.',
+      },
+      includeHeading: {
+        type: 'boolean',
+        description: 'When headingTitle is set, whether to replace/delete the heading itself too (default false).',
+      },
+      afterHeading: {
+        type: 'string',
+        description: 'Optional heading scope filter for block matching.',
+      },
+      replacement: {
+        type: 'string',
+        description: 'Replacement content in Markdown, LaTeX, HTML, or empty string "" to delete the targeted content.',
+      },
+      diagramCode: {
+        type: 'string',
+        description: 'Optional Mermaid diagram definition to replace the target directly with a rendered visual diagram.',
+      },
+      diagramTitle: {
+        type: 'string',
+        description: 'Optional title/alt text when diagramCode is provided.',
+      },
+      caption: {
+        type: 'string',
+        description: 'Optional caption when diagramCode is provided.',
+      },
+      expandToBlocks: {
+        type: 'boolean',
+        description: 'Whether to expand matched range to enclosing paragraph/codeBlock boundaries (default true).',
+      },
+      caseSensitive: {
+        type: 'boolean',
+        description: 'Whether text matching is case-sensitive.',
+      },
+    },
+  },
+  execute: async (args, context) => {
+    const doc = context.activeDocument;
+    if (!doc) return { success: false, error: 'No active document loaded.' };
+
+    const payload: Record<string, unknown> = {
+      targetText: args.targetText,
+      startText: args.startText,
+      endText: args.endText,
+      blockType: args.blockType,
+      containsText: args.containsText,
+      blockIndex: args.blockIndex,
+      headingTitle: args.headingTitle,
+      includeHeading: args.includeHeading,
+      afterHeading: args.afterHeading,
+      replacement: args.replacement ?? '',
+      diagramCode: args.diagramCode,
+      diagramTitle: args.diagramTitle,
+      caption: args.caption,
+      expandToBlocks: args.expandToBlocks,
+      caseSensitive: args.caseSensitive,
+      documentId: doc.id,
+    };
+
+    if (typeof window === 'undefined') {
+      const check = validateActionAgainstActiveDoc(doc, 'replace_content', payload);
+      if (!check.ok) return { success: false, error: check.error };
+    }
+
+    const actionId = `act-rpc-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+    const hasDiagram = Boolean(args.diagramCode);
+    const isDelete = !hasDiagram && !String(args.replacement ?? '').trim();
+    const labelTarget = String(args.startText || args.containsText || args.headingTitle || args.targetText || args.blockType || 'content').slice(0, 40);
+    const summary = isDelete
+      ? `Removed "${labelTarget}"`
+      : hasDiagram
+      ? `Replaced "${labelTarget}" with Mermaid diagram`
+      : `Replaced "${labelTarget}"`;
+
+    const result = await editorRegistry.executeAction('replace_content', payload, doc.id);
+    if (!result.success) {
+      return { success: false, error: result.error || 'Failed to replace content.' };
+    }
+
+    if (context.onEditorAction) {
+      await context.onEditorAction({
+        actionId,
+        action: 'replace_content',
+        payload,
+        summary,
+      });
+    }
+
+    return {
+      success: true,
+      data: {
+        documentId: doc.id,
+        replaced: true,
+        isDelete,
+        withDiagram: hasDiagram,
+      },
+      activitySummary: summary,
+      editorAction: { actionId, action: 'replace_content', payload, summary },
+    };
+  },
+};
+
 export const deleteContentTool: ToolCatalogEntry = {
   id: 'delete_content',
   name: 'delete_content',
   label: 'Delete Content',
-  description: 'Delete selected content, a specific heading section, or matching text in the active document.',
+  description: 'Delete selected content, a heading section, matching text (single or multi-line), an anchored start..end range, or any typed block (e.g. codeBlock, table, paragraph).',
   category: 'content_editing',
   workspace: ['doc'],
   risk: 'destructive',
@@ -1697,8 +2111,8 @@ export const deleteContentTool: ToolCatalogEntry = {
     properties: {
       target: {
         type: 'string',
-        enum: ['selection', 'heading', 'text'],
-        description: 'Deletion target: "selection", "heading", or "text".',
+        enum: ['selection', 'heading', 'text', 'range', 'block'],
+        description: 'Deletion target mode: "selection", "heading", "text", "range", or "block".',
       },
       headingTitle: {
         type: 'string',
@@ -1707,6 +2121,27 @@ export const deleteContentTool: ToolCatalogEntry = {
       targetText: {
         type: 'string',
         description: 'Target text to delete when target is "text".',
+      },
+      startText: {
+        type: 'string',
+        description: 'Start anchor phrase when target is "range".',
+      },
+      endText: {
+        type: 'string',
+        description: 'End anchor phrase when target is "range".',
+      },
+      blockType: {
+        type: 'string',
+        enum: ['any', 'paragraph', 'codeBlock', 'blockquote', 'table', 'callout', 'image', 'shape', 'textBox', 'list'],
+        description: 'Block type when target is "block".',
+      },
+      containsText: {
+        type: 'string',
+        description: 'Text snippet inside block when target is "block".',
+      },
+      blockIndex: {
+        type: 'number',
+        description: 'Optional 0-based index when target is "block".',
       },
     },
     required: ['target'],
@@ -1721,39 +2156,67 @@ export const deleteContentTool: ToolCatalogEntry = {
     if (target === 'heading' && args.headingTitle) {
       const headingTitle = String(args.headingTitle);
       const payload = { headingTitle, documentId: doc.id };
-      const summary = `Deleted section "${headingTitle}"`;
-      if (context.onEditorAction) {
-        await context.onEditorAction({
-          actionId,
-          action: 'delete_section',
-          payload,
-          summary,
-        });
+      if (typeof window === 'undefined') {
+        const check = validateActionAgainstActiveDoc(doc, 'delete_section', payload);
+        if (!check.ok) return { success: false, error: check.error };
       }
+      const summary = `Deleted section "${headingTitle}"`;
       const result = await editorRegistry.executeAction('delete_section', payload, doc.id);
+      if (!result.success) return { success: false, error: result.error || 'Failed to delete section.' };
+      if (context.onEditorAction) {
+        await context.onEditorAction({ actionId, action: 'delete_section', payload, summary });
+      }
       return {
-        success: result.success,
-        error: result.error,
+        success: true,
         activitySummary: summary,
         editorAction: { actionId, action: 'delete_section', payload, summary },
       };
     }
 
+    if (target === 'range' || target === 'block' || (target === 'text' && (args.startText || args.blockType || args.containsText))) {
+      const payload = {
+        targetText: args.targetText,
+        startText: args.startText,
+        endText: args.endText,
+        blockType: args.blockType,
+        containsText: args.containsText,
+        blockIndex: args.blockIndex,
+        replacement: '',
+        expandToBlocks: true,
+        documentId: doc.id,
+      };
+      if (typeof window === 'undefined') {
+        const check = validateActionAgainstActiveDoc(doc, 'replace_content', payload);
+        if (!check.ok) return { success: false, error: check.error };
+      }
+      const label = String(args.startText || args.containsText || args.targetText || args.blockType || 'block').slice(0, 40);
+      const summary = `Deleted ${target} "${label}"`;
+      const result = await editorRegistry.executeAction('replace_content', payload, doc.id);
+      if (!result.success) return { success: false, error: result.error || 'Failed to delete target.' };
+      if (context.onEditorAction) {
+        await context.onEditorAction({ actionId, action: 'replace_content', payload, summary });
+      }
+      return {
+        success: true,
+        activitySummary: summary,
+        editorAction: { actionId, action: 'replace_content', payload, summary },
+      };
+    }
+
     if (target === 'text' && args.targetText) {
       const payload = { findText: String(args.targetText), replaceText: '', documentId: doc.id };
-      const summary = `Deleted text "${args.targetText}"`;
-      if (context.onEditorAction) {
-        await context.onEditorAction({
-          actionId,
-          action: 'find_and_replace_text',
-          payload,
-          summary,
-        });
+      if (typeof window === 'undefined') {
+        const check = validateActionAgainstActiveDoc(doc, 'find_and_replace_text', payload);
+        if (!check.ok) return { success: false, error: check.error };
       }
+      const summary = `Deleted text "${String(args.targetText).slice(0, 40)}"`;
       const result = await editorRegistry.executeAction('find_and_replace_text', payload, doc.id);
+      if (!result.success) return { success: false, error: result.error || 'Failed to delete text.' };
+      if (context.onEditorAction) {
+        await context.onEditorAction({ actionId, action: 'find_and_replace_text', payload, summary });
+      }
       return {
-        success: result.success,
-        error: result.error,
+        success: true,
         activitySummary: summary,
         editorAction: { actionId, action: 'find_and_replace_text', payload, summary },
       };
@@ -1761,6 +2224,7 @@ export const deleteContentTool: ToolCatalogEntry = {
 
     // Default: delete active selection
     const result = await editorRegistry.executeAction('delete_selected_content', { documentId: doc.id }, doc.id);
+    if (!result.success) return { success: false, error: result.error || 'Failed to delete selection.' };
     if (context.onEditorAction) {
       await context.onEditorAction({
         actionId,
@@ -1771,7 +2235,7 @@ export const deleteContentTool: ToolCatalogEntry = {
     }
 
     return {
-      success: result.success,
+      success: true,
       error: result.error,
       activitySummary: result.summary || 'Deleted selected content',
       editorAction: { actionId, action: 'delete_selected_content', payload: { documentId: doc.id }, summary: result.summary },
@@ -2193,7 +2657,7 @@ export const readPdfPageCatalogTool: ToolCatalogEntry = {
   id: 'read_pdf_page',
   name: 'read_pdf_page',
   label: 'Read PDF Page',
-  description: 'Read the extracted text and metadata of a specific PDF page.',
+  description: 'Read extracted text, multi-page ranges, and visual page indicators (isImageOnly, hasEmbeddedImages) from a PDF.',
   category: 'source_reading',
   workspace: ['universal', 'chat', 'doc', 'pdf'],
   risk: 'read_only',
@@ -2238,6 +2702,7 @@ const INITIAL_CATALOG_TOOLS: ToolCatalogEntry[] = [
   readSourceContentTool,
   readPdfPageCatalogTool,
   inspectSourceImageTool,
+  inspectSourceStylesTool,
 
   // Universal: Task Memory
   getTaskScratchpadTool,
@@ -2252,6 +2717,7 @@ const INITIAL_CATALOG_TOOLS: ToolCatalogEntry[] = [
   insertTextTool,
   insertCodeBlockTool,
   replaceTextTool,
+  replaceContentTool,
   deleteContentTool,
   clearCurrentPageTool,
 

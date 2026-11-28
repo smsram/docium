@@ -23,9 +23,12 @@ import { isVisionCapableModel } from '../providers';
 import { getDocumentCapabilitiesPromptSummary } from '@/lib/editor/capabilityRegistry';
 import { parseCloudflarePairs, CloudflarePair } from '../credentials';
 import { buildSharedAgentSystemPrompt } from './systemPrompt';
-import { getOriginalFile } from '@/lib/storage/sourceStorage';
+import { getOriginalFile, loadPersistedWorkspaceChunks } from '@/lib/storage/sourceStorage';
 import { normalizeBase64DataUrl } from '../adapters/cloudflare';
 import { convertMarkdownToDocumentHtml } from '@/components/editor/utils/markdownToHtml';
+import { applyEditorActionToShadowDocHtml } from '@/lib/editor/shadowDocEngine';
+import { hydrateWorkspaceIndexes } from '../serverIndexBridge';
+import { optimizeImageBufferForVision } from '../pdf/pdfService';
 
 /**
  * Mirrors dispatched browser editor actions onto the server's in-memory activeDocContext
@@ -37,77 +40,7 @@ function applyEditorActionToShadowDoc(
   action: string,
   payload: Record<string, unknown>
 ): void {
-  if (!doc) return;
-  const html = doc.content || '';
-  const escapeAttr = (s: string) =>
-    s.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-  const escapeHtml = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-  const escapeRegExp = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-
-  if (action === 'clear_current_page') {
-    doc.content = '<p></p>';
-    doc.wordCount = 0;
-    doc.characterCount = 0;
-    return;
-  }
-
-  if (action === 'insert_text' || action === 'insert_structured_document' || action === 'append_or_insert_paragraph') {
-    const raw = String(payload.content || payload.text || '');
-    if (!raw) return;
-    const converted = convertMarkdownToDocumentHtml(raw);
-    const isEmpty = !html.trim() || html.trim() === '<p></p>' || html.trim() === '<p><br></p>';
-    doc.content = isEmpty ? converted : `${html}${converted}`;
-    return;
-  }
-
-  if (action === 'insert_hyperlink') {
-    const url = String(payload.url || '').trim();
-    if (!url) return;
-    const text = payload.text ? String(payload.text) : undefined;
-    const targetText = payload.targetText ? String(payload.targetText).trim() : undefined;
-    if (targetText) {
-      const linkHtml = `<a href="${escapeAttr(url)}">${escapeHtml(text || targetText)}</a>`;
-      const re = new RegExp(`(>[^<]*?)(${escapeRegExp(targetText)})`, 'i');
-      if (re.test(html)) {
-        doc.content = html.replace(re, `$1${linkHtml}`);
-        return;
-      }
-    }
-    const anchor = `<a href="${escapeAttr(url)}">${escapeHtml(text || targetText || url)}</a>`;
-    const isEmpty = !html.trim() || html.trim() === '<p></p>';
-    doc.content = isEmpty ? `<p>${anchor}</p>` : `${html}<p>${anchor}</p>`;
-    return;
-  }
-
-  if (action === 'replace_section') {
-    const headingTitle = String(payload.headingTitle || payload.headingText || '').trim();
-    const newBody = convertMarkdownToDocumentHtml(String(payload.newContent || ''));
-    if (!headingTitle) return;
-    const headingRe = new RegExp(`(<h([1-6])[^>]*>[^<]*${escapeRegExp(headingTitle)}[^<]*<\\/h\\2>)([\\s\\S]*?)(?=<h[1-6][^>]*>|$)`, 'i');
-    if (headingRe.test(html)) {
-      doc.content = html.replace(headingRe, `$1${newBody}`);
-    }
-    return;
-  }
-
-  if (action === 'replace_text') {
-    const find = String(payload.searchText || payload.oldText || payload.targetText || '');
-    const rep = String(payload.replaceText || payload.newText || '');
-    if (find) {
-      doc.content = html.split(find).join(escapeHtml(rep));
-    }
-    return;
-  }
-
-  if (action === 'delete_hyperlinks') {
-    const targetText = payload.targetText ? String(payload.targetText).trim() : undefined;
-    if (targetText) {
-      const re = new RegExp(`<a[^>]*>([^<]*${escapeRegExp(targetText)}[^<]*)<\\/a>`, 'gi');
-      doc.content = html.replace(re, '$1');
-    } else {
-      doc.content = html.replace(/<a[^>]*>([\s\S]*?)<\/a>/gi, '$1');
-    }
-  }
+  applyEditorActionToShadowDocHtml(doc, action, payload);
 }
 
 export interface AgentRunParams {
@@ -1115,7 +1048,76 @@ export async function* runAgentOrchestrator(params: AgentRunParams): AsyncIterab
 
   const conversationId = params.conversationId || workspaceId;
   const conversationHistory = params.conversationHistory || [];
-  const attachedSources = rawAttachedSources || [];
+  const attachedSources: ResearchSource[] = [];
+  const seenSrcIds = new Set<string>();
+  const seenSrcHashes = new Set<string>();
+  const seenSrcNames = new Set<string>();
+  for (const s of rawAttachedSources || []) {
+    if (!s || !s.id) continue;
+    const h = s.contentHash?.toLowerCase() || '';
+    const n = `${(s.title || '').toLowerCase()}::${(s.fileSize || '').toLowerCase()}`;
+    if (seenSrcIds.has(s.id) || (h && seenSrcHashes.has(h)) || seenSrcNames.has(n)) {
+      continue;
+    }
+    seenSrcIds.add(s.id);
+    if (h) seenSrcHashes.add(h);
+    seenSrcNames.add(n);
+    attachedSources.push(s);
+  }
+
+  // Server Defense-in-Depth: Recover any turn-attached or @mentioned files stored in .docium_storage
+  // if client state dropped attachedSources between upload and prompt submission
+  if (workspaceId) {
+    const persistedChunks = loadPersistedWorkspaceChunks(workspaceId);
+    const recoveryKeys = new Set<string>();
+    for (const att of params.attachments || []) {
+      if ((att as any).id) recoveryKeys.add(String((att as any).id));
+      if (att.name) recoveryKeys.add(att.name);
+    }
+    for (const sid of params.explicitSourceIds || []) {
+      if (sid) recoveryKeys.add(sid);
+    }
+    for (const key of recoveryKeys) {
+      const alreadyPresent = attachedSources.some(
+        (s) => s.id === key || s.title.toLowerCase() === key.toLowerCase()
+      );
+      if (alreadyPresent) continue;
+
+      const stored = getOriginalFile(workspaceId, key);
+      if (stored) {
+        const matchedChunks = persistedChunks.filter((c) => c.sourceId === stored.sourceId);
+        const recoveredText = matchedChunks.map((c) => c.text).join('\n\n').slice(0, 12000);
+        const lowerName = stored.filename.toLowerCase();
+        const inferredType: ResearchSource['type'] =
+          stored.mimeType === 'application/pdf' || lowerName.endsWith('.pdf')
+            ? 'pdf'
+            : lowerName.endsWith('.docx') || lowerName.endsWith('.doc')
+            ? 'docx'
+            : lowerName.endsWith('.xlsx') || lowerName.endsWith('.csv')
+            ? 'xlsx'
+            : lowerName.endsWith('.pptx')
+            ? 'pptx'
+            : stored.mimeType?.startsWith('image/')
+            ? 'image'
+            : 'txt';
+        attachedSources.push({
+          id: stored.sourceId,
+          title: stored.filename,
+          type: inferredType,
+          mimeType: stored.mimeType,
+          fileSize: `${(stored.byteLength / 1024).toFixed(1)} KB`,
+          snippet: recoveredText.slice(0, 280) || `Stored workspace source "${stored.filename}"`,
+          extractedText: recoveredText || undefined,
+          chunkCount: matchedChunks.length || 1,
+          addedAt: stored.createdAt,
+          status: 'ready',
+          tags: ['Attachment', inferredType.toUpperCase()],
+          isIncludedInContext: true,
+          workspaceId,
+        });
+      }
+    }
+  }
 
   const activeDocContext: ActiveDocumentContext | undefined = params.activeDocument || (workspaceType === 'doc' ? {
     id: workspaceId,
@@ -1151,8 +1153,12 @@ export async function* runAgentOrchestrator(params: AgentRunParams): AsyncIterab
   let fileOpExecuted = false;
   let editorActionExecuted = false;
   let contentPlacementExecuted = false;
+  const isPureLayoutViewOrExportIntent =
+    /\b(border|borders|margin|margins|orientation|landscape|portrait|page\s*size|a4|letter|legal|a3|a5|tabloid|column|columns|watermark|page\s*color|background\s*color|header|footer|first\s*page|different\s*first\s*page|page\s*number|zoom|ruler|outline|focus\s*mode|formatting\s*marks|continuous\s*view|paginated\s*view|export|download|print)\b/i.test(userPrompt) &&
+    !/\b(prepare|write|draft|essay|article|report|notes|answers?|questions?|code|program|script|diagram|flowchart|chart)\b/i.test(userPrompt);
   const requiresContentPlacement =
     workspaceType === 'doc' &&
+    !isPureLayoutViewOrExportIntent &&
     /\b(place|insert|write|create|draft|generate|prepare|build|add|put|replace|update|fill|compose|produce)\b/i.test(userPrompt);
   const CONTENT_PLACEMENT_TOOLS = new Set([
     'insert_text',
@@ -1168,19 +1174,56 @@ export async function* runAgentOrchestrator(params: AgentRunParams): AsyncIterab
     'insert_table',
     'insert_document_table',
     'replace_table',
+    'style_table',
     'insert_code_block',
     'insert_callout',
     'insert_shape',
     'insert_text_box',
     'insert_chart',
+    'insert_diagram',
     'insert_image',
     'insert_equation',
+    'insert_cover_page',
+    'insert_footnote',
+    'insert_endnote',
+    'insert_caption',
     'replace_text',
+    'replace_content',
     'replace_section',
     'replace_paragraph',
+    'delete_content',
+    'delete_section',
+    'delete_paragraph',
+    'delete_matching_content',
     'rewrite_content',
     'expand_content',
     'shorten_content',
+    'simplify_content',
+    'formalize_content',
+    'change_content_tone',
+    'translate_content',
+    'proofread_content',
+    'continue_writing',
+    'generate_section_content',
+    'set_page_borders',
+    'set_page_color',
+    'set_page_columns',
+    'set_page_size',
+    'set_page_orientation',
+    'set_page_margins',
+    'update_header',
+    'update_footer',
+    'delete_header',
+    'delete_footer',
+    'insert_page_numbers',
+    'insert_watermark',
+    'set_document_view',
+    'export_as_pdf',
+    'export_as_docx',
+    'export_as_html',
+    'export_as_txt',
+    'export_as_markdown',
+    'print_document',
   ]);
 
   let stepOrder = 0;
@@ -1345,7 +1388,16 @@ export async function* runAgentOrchestrator(params: AgentRunParams): AsyncIterab
     hasExplicitImageMention ||
     (promptMentionsImage && attachedSources.some((s) => s.type === 'image' || s.mimeType?.startsWith('image/')));
 
-  if (hasImageAttachments) {
+  const needsDirectVisionInTurn =
+    Boolean(params.attachments && params.attachments.some((a) => a.type?.startsWith('image/'))) ||
+    attachedSources.some((s) => {
+      const isImg = s.type === 'image' || s.mimeType?.startsWith('image/') || /\.(jpe?g|png|webp|gif|svg)$/i.test(s.title);
+      if (!isImg) return false;
+      const hasCachedAnalysis = Boolean(s.imageDescription && s.imageCards?.some((c) => c.analysisStatus === 'analyzed'));
+      return !hasCachedAnalysis && (hasExplicitImageMention || promptMentionsImage);
+    });
+
+  if (needsDirectVisionInTurn) {
     const isVision = isVisionCapableModel(modelId, providerId);
     if (!isVision) {
       initialAct.status = 'failed';
@@ -1431,6 +1483,11 @@ export async function* runAgentOrchestrator(params: AgentRunParams): AsyncIterab
 
   const activeLoadedToolIds = new Set<string>();
 
+  // Hydrate persisted workspace chunks & image cards from disk on cold start / cache miss
+  hydrateWorkspaceIndexes(workspaceId);
+
+  const isStyleInspectionIntent = /\b(style|styling|styles|theme|font|fonts|color|colors|palette|margin|margins|layout|design|template|match|replicate|look\s+like)\b/i.test(userPrompt);
+
   // In AI Chat, universal tools and source reading capabilities are available by default
   if (params.workspaceType === 'chat') {
     activeLoadedToolIds.add('list_sources');
@@ -1439,6 +1496,9 @@ export async function* runAgentOrchestrator(params: AgentRunParams): AsyncIterab
     activeLoadedToolIds.add('read_source_content');
     activeLoadedToolIds.add('read_pdf_page');
     activeLoadedToolIds.add('search_pdf_content');
+    if (hasAttachments) {
+      activeLoadedToolIds.add('inspect_source_styles');
+    }
     if (hasImageAttachments) {
       activeLoadedToolIds.add('inspect_source_image');
     }
@@ -1454,9 +1514,10 @@ export async function* runAgentOrchestrator(params: AgentRunParams): AsyncIterab
       'read_document_content',
       'find_document_content',
       'get_document_structure',
-      // Core edits (text-level)
+      // Core edits (text-level & universal block/range replace)
       'insert_text',
       'replace_text',
+      'replace_content',
       'replace_section',
       'delete_content',
       'clear_current_page',
@@ -1484,36 +1545,74 @@ export async function* runAgentOrchestrator(params: AgentRunParams): AsyncIterab
     // Conditionally load specialized clusters only when prompt intent matches
     if (/\b(table|tables|row|rows|column|columns|cell|cells|comparison)\b/i.test(userPrompt)) {
       activeLoadedToolIds.add('insert_table');
+      activeLoadedToolIds.add('style_table');
       activeLoadedToolIds.add('replace_table');
     }
     if (/\b(code|program|programs|script|python|javascript|typescript|java|c\+\+|snippet|function)\b/i.test(userPrompt)) {
       activeLoadedToolIds.add('insert_code_block');
     }
-    if (/\b(margin|margins|page\s*size|a4|letter|legal|orientation|landscape|portrait|header|footer|page\s*number|page\s*break|watermark|page\s*color|page\s*border)\b/i.test(userPrompt)) {
+    if (/\b(margin|margins|page\s*size|a4|letter|legal|a3|a5|tabloid|orientation|landscape|portrait|header|footer|first\s*page|remaining\s*pages|page\s*number|page\s*break|section\s*break|watermark|page\s*color|background\s*color|border|borders|column|columns|cover\s*page)\b/i.test(userPrompt)) {
+      activeLoadedToolIds.add('get_page_settings');
       activeLoadedToolIds.add('set_page_size');
       activeLoadedToolIds.add('set_page_orientation');
       activeLoadedToolIds.add('set_page_margins');
+      activeLoadedToolIds.add('set_page_columns');
+      activeLoadedToolIds.add('set_page_color');
+      activeLoadedToolIds.add('set_page_borders');
       activeLoadedToolIds.add('update_header');
       activeLoadedToolIds.add('update_footer');
+      activeLoadedToolIds.add('delete_header');
+      activeLoadedToolIds.add('delete_footer');
       activeLoadedToolIds.add('insert_page_numbers');
       activeLoadedToolIds.add('insert_page_break');
+      activeLoadedToolIds.add('insert_section_break');
       activeLoadedToolIds.add('insert_watermark');
+      activeLoadedToolIds.add('insert_cover_page');
     }
-    if (/\b(shape|shapes|rectangle|circle|ellipse|arrow|diamond|star|flowchart|banner|text\s*box|textbox|sidebar\s*box|equation|formula|math)\b/i.test(userPrompt)) {
-      activeLoadedToolIds.add('insert_shape');
-      activeLoadedToolIds.add('insert_text_box');
-      activeLoadedToolIds.add('insert_equation');
+    if (/\b(export|download|save\s*as|print|pdf|docx|word|html|markdown|md|txt)\b/i.test(userPrompt)) {
+      activeLoadedToolIds.add('export_as_pdf');
+      activeLoadedToolIds.add('export_as_docx');
+      activeLoadedToolIds.add('export_as_html');
+      activeLoadedToolIds.add('export_as_txt');
+      activeLoadedToolIds.add('export_as_markdown');
+      activeLoadedToolIds.add('print_document');
     }
-    if (/\b(chart|charts|graph|graphs|plot|visual|diagram)\b/i.test(userPrompt)) {
-      activeLoadedToolIds.add('insert_chart');
+    if (/\b(zoom|ruler|outline|formatting\s*marks|focus\s*mode|paginated|continuous\s*view|suggesting|spell\s*check|comment|comments|footnote|endnote|citation|bibliography|table\s*of\s*contents|toc)\b/i.test(userPrompt)) {
+      activeLoadedToolIds.add('set_document_view');
+      activeLoadedToolIds.add('set_editor_preferences');
+      activeLoadedToolIds.add('add_document_comment');
+      activeLoadedToolIds.add('insert_footnote');
+      activeLoadedToolIds.add('insert_endnote');
+      activeLoadedToolIds.add('insert_table_of_contents');
     }
-    if (/\b(align|alignment|center|justify|bold|italic|underline|strike|color|highlight|spacing|paragraph|style|styling|callout)\b/i.test(userPrompt)) {
+    if (/\b(align|alignment|center|justify|bold|italic|underline|strike|color|highlight|spacing|paragraph|style|styling|callout|subscript|superscript|indent|outdent|uppercase|lowercase|title\s*case|case|clear\s*formatting)\b/i.test(userPrompt)) {
       activeLoadedToolIds.add('set_text_alignment');
       activeLoadedToolIds.add('format_all_paragraphs');
       activeLoadedToolIds.add('set_font_color');
       activeLoadedToolIds.add('set_highlight_color');
       activeLoadedToolIds.add('set_paragraph_spacing');
       activeLoadedToolIds.add('insert_callout');
+      activeLoadedToolIds.add('set_subscript');
+      activeLoadedToolIds.add('set_superscript');
+      activeLoadedToolIds.add('adjust_indent');
+      activeLoadedToolIds.add('change_text_case');
+      activeLoadedToolIds.add('remove_formatting');
+    }
+    if (/\b(shape|shapes|rectangle|circle|ellipse|arrow|diamond|star|flowchart|banner|text\s*box|textbox|sidebar\s*box|equation|formula|math)\b/i.test(userPrompt)) {
+      activeLoadedToolIds.add('insert_shape');
+      activeLoadedToolIds.add('insert_text_box');
+      activeLoadedToolIds.add('insert_equation');
+      activeLoadedToolIds.add('insert_diagram');
+    }
+    if (/\b(chart|charts|graph|graphs|plot|visual|diagram|diagrams|flowchart|flow|sequence|architecture|mindmap|ascii|mermaid)\b/i.test(userPrompt)) {
+      activeLoadedToolIds.add('insert_diagram');
+      activeLoadedToolIds.add('insert_chart');
+    }
+    if (
+      hasAttachments &&
+      /\b(image|images|diagram|diagrams|figure|chart|visual|screenshot|picture|page\s*\d+)\b/i.test(userPrompt)
+    ) {
+      activeLoadedToolIds.add('inspect_source_image');
     }
     // Web search: load when prompt involves research, news, latest info, or document creation from scratch
     if (/\b(search|find|look up|research|latest|recent|current|news|update|google|web|internet|until now|as of|today)\b/i.test(userPrompt) ||
@@ -1529,17 +1628,23 @@ export async function* runAgentOrchestrator(params: AgentRunParams): AsyncIterab
       activeLoadedToolIds.add('read_source_content');
       activeLoadedToolIds.add('read_pdf_page');
       activeLoadedToolIds.add('search_pdf_content');
+      if (isStyleInspectionIntent) {
+        activeLoadedToolIds.add('inspect_source_styles');
+      }
       if (hasImageAttachments) {
         activeLoadedToolIds.add('inspect_source_image');
       }
     }
   }
 
-  // Proactively preload image tool ONLY when image is actually attached or targeted in this turn
+  // Proactively preload image/style source tools when relevant
   if (hasImageAttachments) {
     activeLoadedToolIds.add('inspect_source_image');
     activeLoadedToolIds.add('list_sources');
     activeLoadedToolIds.add('get_source_details');
+    if (isStyleInspectionIntent) {
+      activeLoadedToolIds.add('inspect_source_styles');
+    }
   } else if (isSourceReferenced) {
     activeLoadedToolIds.add('list_sources');
     activeLoadedToolIds.add('get_source_details');
@@ -1547,6 +1652,9 @@ export async function* runAgentOrchestrator(params: AgentRunParams): AsyncIterab
     activeLoadedToolIds.add('read_source_content');
     activeLoadedToolIds.add('read_pdf_page');
     activeLoadedToolIds.add('search_pdf_content');
+    if (isStyleInspectionIntent) {
+      activeLoadedToolIds.add('inspect_source_styles');
+    }
   }
 
   // Hook up context.onLoadTools so load_tool_definitions activates tools for subsequent rounds
@@ -1619,8 +1727,16 @@ export async function* runAgentOrchestrator(params: AgentRunParams): AsyncIterab
     const searchAct = addActivity('Reading attached files', 'running', scanLabel);
     yield createSSEEvent({ type: 'activity', event: searchAct });
 
-    const chunks = await searchRelevantChunks(userPrompt, workspaceId, 4);
+    const activeSourceIds = new Set(attachedSources.map((s) => s.id));
+    const rawChunks = await searchRelevantChunks(userPrompt, workspaceId, 8);
+    const chunks = rawChunks.filter((c) => activeSourceIds.has(c.chunk.sourceId)).slice(0, 4);
+    const emittedCitationKeys = new Set<string>();
     for (const chk of chunks) {
+      const citeKey = `src:${(chk.chunk.sourceId || chk.sourceTitle || '').toLowerCase()}`;
+      if (emittedCitationKeys.has(citeKey)) {
+        continue;
+      }
+      emittedCitationKeys.add(citeKey);
       const cite = {
         sourceId: chk.chunk.sourceId,
         sourceTitle: chk.sourceTitle,
@@ -1776,11 +1892,28 @@ Report this exact API error to the user so they can verify their API key or prov
     (/\b(?:image|photo|picture|screenshot|diagram|chart|visual|ocr|inspect|look at this)\b/i.test(lowerUserPrompt) ||
       Boolean(targetedSource && (targetedSource.type === 'image' || targetedSource.mimeType?.startsWith('image/'))));
 
-  // Only include workspace sources if NOT targeting a PDF and the image is genuinely relevant
+  const turnAttachmentIds = new Set<string>(
+    (params.attachments || []).map((a) => ((a as any).id || a.name || '').toLowerCase()).filter(Boolean)
+  );
+  const needsExactPixelInspection = /\b(?:exact|pixel|crop|hex|zoom|read every|ocr|transcribe|verbatim)\b/i.test(lowerUserPrompt);
+
+  // Only include workspace sources if NOT targeting a PDF and either unanalyzed or explicitly attached for this turn
   if (!isPdfOrDocTargeted) {
     for (const s of attachedSources) {
       // Never treat a PDF as an image source!
       if (s.type === 'pdf' || s.mimeType === 'application/pdf' || s.title.toLowerCase().endsWith('.pdf')) {
+        continue;
+      }
+
+      const isImageSrc = s.type === 'image' || s.mimeType?.startsWith('image/') || Boolean(s.title.match(/\.(jpe?g|png|webp|gif|svg)$/i));
+      if (!isImageSrc) continue;
+
+      const isTurnAttached = turnAttachmentIds.has(s.id.toLowerCase()) || turnAttachmentIds.has(s.title.toLowerCase());
+      const hasCachedVisionSummary = Boolean(s.imageDescription && s.imageCards?.some((c) => c.analysisStatus === 'analyzed'));
+
+      // Skip eager raw base64 re-injection when we already have a real VLM summary in the manifest
+      // (AI can still call inspect_source_image on demand if pixel inspection is required)
+      if (!isTurnAttached && hasCachedVisionSummary && !needsExactPixelInspection) {
         continue;
       }
 
@@ -1789,13 +1922,10 @@ Report this exact API error to the user so they can verify their API key or prov
         lowerUserPrompt.includes(s.title.toLowerCase()) ||
         lowerUserPrompt.includes(s.id.toLowerCase());
 
-      const shouldInclude =
-        isThisSourceMentioned || (isImageTargeted && (s.type === 'image' || s.mimeType?.startsWith('image/')));
+      const shouldInclude = isThisSourceMentioned || isImageTargeted;
 
       if (shouldInclude) {
-        if (s.type === 'image' || s.mimeType?.startsWith('image/') || s.title.match(/\.(jpe?g|png|webp|gif|svg)$/i)) {
-          candidateImageRefs.push({ ref: s.id, mimeHint: s.mimeType, nameHint: s.title });
-        }
+        candidateImageRefs.push({ ref: s.id, mimeHint: s.mimeType, nameHint: s.title });
       }
     }
   }
@@ -1803,10 +1933,16 @@ Report this exact API error to the user so they can verify their API key or prov
   for (const item of candidateImageRefs) {
     if (imageUrls.length >= 5) break; // Enforce configured limit of 5 images per request
 
-    // 1. If already a valid base64 data URI
+    // 1. If already a valid base64 data URI (optimize if oversized)
     const norm = normalizeBase64DataUrl(item.ref);
     if (norm) {
-      if (!imageUrls.includes(norm)) imageUrls.push(norm);
+      let finalUri = norm;
+      const m = norm.match(/^data:(image\/[a-zA-Z0-9.+_-]+);base64,([\s\S]+)$/);
+      if (m && m[2].length > 900 * 1024) {
+        const opt = await optimizeImageBufferForVision(Buffer.from(m[2], 'base64'), m[1]);
+        finalUri = `data:${opt.mimeType};base64,${opt.buffer.toString('base64')}`;
+      }
+      if (!imageUrls.includes(finalUri)) imageUrls.push(finalUri);
       continue;
     }
 
@@ -1823,7 +1959,8 @@ Report this exact API error to the user so they can verify their API key or prov
     const stored = getOriginalFile(workspaceId, lookupKey) || (item.nameHint ? getOriginalFile(workspaceId, item.nameHint) : null);
     if (stored && stored.buffer && stored.buffer.length > 0) {
       const mime = stored.mimeType || item.mimeHint || 'image/jpeg';
-      const cleanDataUrl = `data:${mime};base64,${stored.buffer.toString('base64')}`;
+      const opt = await optimizeImageBufferForVision(stored.buffer, mime);
+      const cleanDataUrl = `data:${opt.mimeType};base64,${opt.buffer.toString('base64')}`;
       const validated = normalizeBase64DataUrl(cleanDataUrl);
       if (validated && !imageUrls.includes(validated)) {
         imageUrls.push(validated);
@@ -1850,8 +1987,8 @@ Report this exact API error to the user so they can verify their API key or prov
 
   // 7. Dynamic Task-Aware Execution Management
   let loopCount = 0;
-  const BASE_EXECUTION_BUDGET = 12;
-  const MAX_DYNAMIC_BUDGET = 20;
+  const BASE_EXECUTION_BUDGET = 14;
+  const MAX_DYNAMIC_BUDGET = 24;
   let dynamicBudget = BASE_EXECUTION_BUDGET;
   let executionStage: AgentExecutionStage = 'idle';
   const executedToolsRecord: ExecutedToolRecord[] = [];
@@ -1866,15 +2003,25 @@ Report this exact API error to the user so they can verify their API key or prov
 
   const buildCompactedMessagesForRound = (roundNum: number): NormalizedMessage[] => {
     const recentCutoff = Math.max(2, messages.length - 4);
+    // Once past initial vision inspection or non-discovery tool calls, strip heavy raw user.images so styling/verification rounds stay fast & lean
+    const stripUserImagesOnFollowup =
+      roundNum >= 3 ||
+      (roundNum >= 2 &&
+        executedToolsRecord.some((t) => t.name !== 'search_tool_catalog' && t.name !== 'load_tool_definitions'));
+
     const compacted = messages.map((msg, idx) => {
+      let nextMsg = msg;
+      if (stripUserImagesOnFollowup && nextMsg.role === 'user' && nextMsg.images && nextMsg.images.length > 0) {
+        nextMsg = { ...nextMsg, images: undefined };
+      }
       // Compact older bulky tool payloads (> 1400 chars) so context tokens do not grow quadratically across rounds
-      if (idx < recentCutoff && msg.role === 'tool' && msg.content && msg.content.length > 1400) {
+      if (idx < recentCutoff && nextMsg.role === 'tool' && nextMsg.content && nextMsg.content.length > 1400) {
         return {
-          ...msg,
-          content: `${msg.content.slice(0, 450)}\n...[Compacted ${msg.content.length} chars from earlier round; refer to Task Progress Ledger]`,
+          ...nextMsg,
+          content: `${nextMsg.content.slice(0, 450)}\n...[Compacted ${nextMsg.content.length} chars from earlier round; refer to Task Progress Ledger]`,
         };
       }
-      return msg;
+      return nextMsg;
     });
 
     // Inject compact Per-Response Task Progress Ledger into the system prompt on Round 2+
@@ -2149,6 +2296,28 @@ Report this exact API error to the user so they can verify their API key or prov
 
     // If no tool calls were made in this round
     if (pendingCalls.length === 0) {
+      // Automatic multi-iteration continuation when a round hit max output token limit
+      if (
+        roundFinishReason === 'length' &&
+        workspaceType === 'doc' &&
+        loopCount < dynamicBudget - 1
+      ) {
+        dynamicBudget = Math.min(MAX_DYNAMIC_BUDGET, dynamicBudget + 2);
+        console.log(
+          `[DOCIUM Agent] Output hit token limit (finishReason=length) on round ${loopCount}. Prompting chunked continuation via append_content...`
+        );
+        if (assistantContent.trim()) {
+          messages.push({ role: 'assistant', content: assistantContent });
+        }
+        messages.push({
+          role: 'user',
+          content: contentPlacementExecuted
+            ? `/no_think\n[SYSTEM CONTINUATION] Your previous output reached the token limit. Continue writing only the REMAINING sections into the document by calling "append_content" (or "insert_text" with position "end"), without repeating earlier headings. Keep sections compact (~600-900 words per call) and run final styling + "verify_document_state" when finished. /no_think`
+            : `/no_think\n[SYSTEM CONTINUATION] Your previous output hit the token limit before calling tools. Split the document into smaller batches: call "insert_text" right now with just the first 2-3 sections cleanly, then append the rest in the next round. /no_think`,
+        });
+        continue;
+      }
+
       // Check document action request enforcement first
       const isDocAction = workspaceType === 'doc' && isDocumentActionRequest(userPrompt);
 
@@ -2156,8 +2325,9 @@ Report this exact API error to the user so they can verify their API key or prov
       if (isDocAction && (!editorActionExecuted || needsContentPlacementStill || repetitionLoopAborted)) {
         // Document modification requested, but content placement was not executed yet!
         const isFormatOrReplaceOnly =
-          /\b(spacing|line\s*height|line\s*spacing|font|bold|italic|underline|strikethrough|align|center|justify|color|highlight|replace|delete|remove|clear)\b/i.test(userPrompt) &&
-          !/\b(prepare|write|create|draft|generate|insert|add|extract|put|build|compile|compose|produce)\b/i.test(userPrompt);
+          isPureLayoutViewOrExportIntent ||
+          (/\b(spacing|line\s*height|line\s*spacing|font|bold|italic|underline|strikethrough|align|center|justify|color|highlight|replace|delete|remove|clear)\b/i.test(userPrompt) &&
+            !/\b(prepare|write|create|draft|generate|insert|add|extract|put|build|compile|compose|produce)\b/i.test(userPrompt));
 
         const hasCodeBlock = /```[\s\S]*?```/.test(assistantContent);
         const hasStructuredContent = assistantContent.length > 180 && (assistantContent.includes('#') || assistantContent.includes('\n\n'));

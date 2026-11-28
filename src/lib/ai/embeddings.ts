@@ -9,8 +9,8 @@
  * 5. Preserves document structure: page, slide, sheet, cell range, section headings, and embedded image assets.
  */
 
-import { EmbeddingConfig } from '@/lib/types';
-import { DocumentImageAsset } from './ingestion/parser';
+import type { EmbeddingConfig } from '@/lib/types';
+import type { DocumentImageAsset } from './ingestion/parser';
 
 export interface SemanticChunk {
   id: string;
@@ -143,32 +143,53 @@ export function cosineSimilarity(a: number[], b: number[]): number {
 }
 
 /**
- * Computes exact phrase and keyword overlap score (BM25-style relevance).
+ * Computes exact phrase + BM25-saturated keyword relevance score with optional heading boost.
  */
-export function calculateKeywordScore(query: string, text: string): number {
+export function calculateKeywordScore(query: string, text: string, heading?: string): number {
   const qClean = query.toLowerCase().trim();
   const tClean = text.toLowerCase();
 
   if (!qClean || !tClean) return 0;
 
-  // Exact phrase match bonus
   let score = 0;
-  if (tClean.includes(qClean)) {
-    score += 0.45;
+  // Exact phrase bonus
+  if (qClean.length >= 4 && tClean.includes(qClean)) {
+    score += 0.4;
   }
 
-  // Word token overlap
-  const queryTerms = qClean.split(/\s+/).filter((t) => t.length > 2);
-  if (queryTerms.length === 0) return score;
+  // Word token overlap with BM25-style term-frequency saturation
+  const queryTerms = Array.from(
+    new Set(
+      qClean
+        .replace(/[^\p{L}\p{N}\s_-]+/gu, ' ')
+        .split(/\s+/)
+        .filter((t) => t.length > 1)
+    )
+  );
+  if (queryTerms.length === 0) return Math.min(1.0, score);
 
-  let termMatches = 0;
+  let matchedWeight = 0;
+  const hClean = heading ? heading.toLowerCase() : '';
+
   for (const term of queryTerms) {
-    if (tClean.includes(term)) {
-      termMatches++;
+    // Count occurrences bounded reasonably
+    let count = 0;
+    let idx = 0;
+    while ((idx = tClean.indexOf(term, idx)) !== -1 && count < 10) {
+      count++;
+      idx += term.length;
+    }
+    if (count > 0) {
+      // BM25-like saturation k1 = 1.2
+      const tfSat = (count * 2.2) / (count + 1.2);
+      matchedWeight += tfSat;
+    }
+    if (hClean && hClean.includes(term)) {
+      score += 0.08;
     }
   }
 
-  score += (termMatches / queryTerms.length) * 0.55;
+  score += (matchedWeight / queryTerms.length) * 0.55;
   return Math.min(1.0, score);
 }
 
@@ -384,11 +405,14 @@ export async function searchRelevantChunks(
       semScore = Math.max(0, cosineSimilarity(queryVector, chunk.vector));
     }
 
-    // 2. Keyword & exact phrase score
-    const kwScore = calculateKeywordScore(query, chunk.text);
+    // 2. Keyword & exact phrase score (with heading signal)
+    const kwScore = calculateKeywordScore(query, chunk.text, chunk.heading);
 
-    // 3. Combined hybrid score
-    const hybridScore = semScore > 0 ? 0.65 * semScore + 0.35 * kwScore : kwScore;
+    // 3. Combined hybrid score (boost chunks matching visual intent if carrying images)
+    let hybridScore = semScore > 0 ? 0.55 * semScore + 0.45 * kwScore : kwScore;
+    if (hasVisualIntent && (chunk.contentType === 'image_description' || (chunk.imageReferences && chunk.imageReferences.length > 0))) {
+      hybridScore = Math.min(1.0, hybridScore + 0.12);
+    }
 
     // Build human-readable citation
     let citation = `Source: ${chunk.sourceTitle}`;

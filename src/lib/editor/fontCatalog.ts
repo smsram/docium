@@ -138,6 +138,11 @@ const RAW_FONT_CATALOG: FontCatalogEntry[] = [
   { name: 'Wide Latin', value: '"Wide Latin", Georgia, serif', category: 'display', source: 'microsoft' },
 
   // --- Google Fonts (Sans-Serif, Serif, Monospace, Display, Handwriting) ---
+  { name: 'Google Sans', value: '"Google Sans", "Product Sans", Inter, sans-serif', category: 'sans-serif', source: 'google', googleFamily: 'Google+Sans' },
+  { name: 'Google Sans Display', value: '"Google Sans Display", "Google Sans", sans-serif', category: 'display', source: 'google', googleFamily: 'Google+Sans+Display' },
+  { name: 'Google Sans Mono', value: '"Google Sans Mono", "JetBrains Mono", monospace', category: 'monospace', source: 'google', googleFamily: 'Google+Sans+Mono' },
+  { name: 'Google Sans Text', value: '"Google Sans Text", "Google Sans", sans-serif', category: 'sans-serif', source: 'google', googleFamily: 'Google+Sans+Text' },
+  { name: 'Product Sans', value: '"Product Sans", "Google Sans", Inter, sans-serif', category: 'sans-serif', source: 'google', googleFamily: 'Product+Sans' },
   { name: 'Inter', value: 'Inter, sans-serif', category: 'sans-serif', source: 'google', googleFamily: 'Inter' },
   { name: 'Geist', value: 'Geist, Inter, sans-serif', category: 'sans-serif', source: 'google', googleFamily: 'Geist' },
   { name: 'Roboto', value: 'Roboto, sans-serif', category: 'sans-serif', source: 'google', googleFamily: 'Roboto' },
@@ -283,7 +288,10 @@ export const FONT_SIZE_SELECT_OPTIONS = FONT_SIZE_PT_VALUES.map((size) => ({
  * to its canonical Select option value in FONT_CATALOG.
  */
 export function resolveFontFamilyValue(rawFont: string | null | undefined): string {
-  const defaultEntry = FONT_CATALOG.find((f) => f.name === 'Inter') || FONT_CATALOG[0];
+  const defaultEntry =
+    FONT_CATALOG.find((f) => f.name === 'Calibri') ||
+    FONT_CATALOG.find((f) => f.name === 'Inter') ||
+    FONT_CATALOG[0];
   if (!rawFont || !rawFont.trim()) {
     return defaultEntry.value;
   }
@@ -351,9 +359,107 @@ export function normalizeFontSizeToPt(
 }
 
 const loadedGoogleFamilies = new Set<string>();
+const loadedLocalCatalogFamilies = new Set<string>();
 
 /**
- * Dynamically loads a Google Font stylesheet into the browser document <head> if needed.
+ * Core preinstalled Windows fonts (`C:\Windows\Fonts`) that Chrome already resolves natively
+ * across Regular/Bold/Italic/BoldItalic without needing `@font-face` rules.
+ */
+const WINDOWS_CORE_LOCAL_FAMILIES = new Set([
+  'arial',
+  'arial black',
+  'bahnschrift',
+  'calibri',
+  'calibri light',
+  'cambria',
+  'cambria math',
+  'candara',
+  'cascademono',
+  'cascadia code',
+  'comic sans ms',
+  'consolas',
+  'constantia',
+  'corbel',
+  'courier new',
+  'ebrima',
+  'franklin gothic medium',
+  'gabriola',
+  'gadugi',
+  'georgia',
+  'impact',
+  'ink free',
+  'lucida console',
+  'lucida sans unicode',
+  'microsoft sans serif',
+  'palatino linotype',
+  'segoe print',
+  'segoe script',
+  'segoe ui',
+  'segoe ui light',
+  'segoe ui semibold',
+  'sitka text',
+  'sylfaen',
+  'tahoma',
+  'times new roman',
+  'trebuchet ms',
+  'verdana',
+]);
+
+/**
+ * Multi-weight Microsoft Office / CloudFont / System families that provide distinct Regular and Bold faces via `/api/fonts/ttf`.
+ * Single-weight families (e.g. Vivaldi, Brush Script MT, Chiller, Vladimir Script) register a single `@font-face` rule
+ * so browsers apply `font-synthesis: weight` on bold runs (`<strong>` / headings).
+ */
+const MULTI_WEIGHT_NON_GOOGLE_FAMILIES = new Set([
+  'aptos',
+  'aptos display',
+  'aptos mono',
+  'aptos narrow',
+  'aptos serif',
+  'arial narrow',
+  'baskerville',
+  'bell mt',
+  'berlin sans fb',
+  'bodoni mt',
+  'book antiqua',
+  'bookman old style',
+  'californian fb',
+  'calisto mt',
+  'century gothic',
+  'century schoolbook',
+  'didot',
+  'futura',
+  'garamond',
+  'gill sans mt',
+  'goudy old style',
+  'helvetica',
+  'lucida bright',
+  'lucida sans',
+  'lucida sans typewriter',
+  'optima',
+  'perpetua',
+  'rockwell',
+  'tw cen mt',
+]);
+
+function buildCatalogFontFaceCss(entry: FontCatalogEntry): string {
+  const name = entry.name;
+  const enc = encodeURIComponent(name);
+  const key = name.toLowerCase();
+  if (MULTI_WEIGHT_NON_GOOGLE_FAMILIES.has(key)) {
+    return [
+      `@font-face { font-family: "${name}"; font-style: normal; font-weight: 400; font-display: swap; src: local("${name}"), url("/api/fonts/ttf?family=${enc}&weight=400&italic=0") format("truetype"); }`,
+      `@font-face { font-family: "${name}"; font-style: normal; font-weight: 700; font-display: swap; src: local("${name} Bold"), local("${name}-Bold"), url("/api/fonts/ttf?family=${enc}&weight=700&italic=0") format("truetype"); }`,
+      `@font-face { font-family: "${name}"; font-style: italic; font-weight: 400; font-display: swap; src: local("${name} Italic"), local("${name}-Italic"), url("/api/fonts/ttf?family=${enc}&weight=400&italic=1") format("truetype"); }`,
+      `@font-face { font-family: "${name}"; font-style: italic; font-weight: 700; font-display: swap; src: local("${name} Bold Italic"), local("${name}-BoldItalic"), url("/api/fonts/ttf?family=${enc}&weight=700&italic=1") format("truetype"); }`,
+    ].join('\n');
+  }
+  return `@font-face { font-family: "${name}"; font-display: swap; src: local("${name}"), local("${name} Italic"), url("/api/fonts/ttf?family=${enc}&weight=400&italic=0") format("truetype"); }`;
+}
+
+/**
+ * Dynamically loads a catalog font (Google Font, Microsoft Office CloudFont, or System font)
+ * into the browser document <head> if needed so both workspace canvas and font dropdown previews render accurately.
  */
 export function ensureGoogleFontLoaded(fontValueOrName: string | null | undefined): void {
   if (typeof document === 'undefined' || !fontValueOrName) return;
@@ -365,66 +471,81 @@ export function ensureGoogleFontLoaded(fontValueOrName: string | null | undefine
       item.value.toLowerCase() === fontValueOrName.trim().toLowerCase()
   );
 
-  if (!entry || entry.source !== 'google' || !entry.googleFamily) return;
-  if (loadedGoogleFamilies.has(entry.googleFamily)) return;
+  if (!entry) return;
 
-  loadedGoogleFamilies.add(entry.googleFamily);
-  const linkId = `docium-gfont-${entry.googleFamily.replace(/[^a-zA-Z0-9_-]/g, '-')}`;
-  if (document.getElementById(linkId)) return;
+  if (entry.source === 'google' && entry.googleFamily) {
+    if (loadedGoogleFamilies.has(entry.googleFamily)) return;
+    loadedGoogleFamilies.add(entry.googleFamily);
+    const linkId = `docium-gfont-${entry.googleFamily.replace(/[^a-zA-Z0-9_-]/g, '-')}`;
+    if (!document.getElementById(linkId)) {
+      const link = document.createElement('link');
+      link.id = linkId;
+      link.rel = 'stylesheet';
+      link.href = `https://fonts.googleapis.com/css2?family=${entry.googleFamily}:ital,wght@0,400;0,500;0,600;0,700;1,400;1,700&display=swap`;
+      document.head.appendChild(link);
+    }
+    return;
+  }
 
-  const link = document.createElement('link');
-  link.id = linkId;
-  link.rel = 'stylesheet';
-  link.href = `https://fonts.googleapis.com/css2?family=${entry.googleFamily}:ital,wght@0,400;0,500;0,600;0,700;1,400;1,700&display=swap`;
-  document.head.appendChild(link);
+  const key = entry.name.toLowerCase();
+  if (WINDOWS_CORE_LOCAL_FAMILIES.has(key) || loadedLocalCatalogFamilies.has(key)) return;
+  loadedLocalCatalogFamilies.add(key);
+
+  const styleId = 'docium-catalog-font-faces';
+  let styleEl = document.getElementById(styleId) as HTMLStyleElement | null;
+  if (!styleEl) {
+    styleEl = document.createElement('style');
+    styleEl.id = styleId;
+    document.head.appendChild(styleEl);
+  }
+  styleEl.appendChild(document.createTextNode('\n' + buildCatalogFontFaceCss(entry)));
 }
 
 let preloadedPopular = false;
 
 /**
- * Preloads the most popular Google Fonts in batched stylesheet requests so font previews and documents render immediately.
+ * Preloads all Google Fonts in batched stylesheet requests and registers `@font-face` rules
+ * for Microsoft Office / CloudFont / System fonts so font dropdown previews and documents render accurately.
  */
 export function preloadPopularGoogleFonts(): void {
   if (typeof document === 'undefined' || preloadedPopular) return;
   preloadedPopular = true;
 
-  const popularFamilies = [
-    'Inter',
-    'Roboto',
-    'Open+Sans',
-    'Lato',
-    'Montserrat',
-    'Poppins',
-    'Nunito',
-    'Raleway',
-    'Merriweather',
-    'Playfair+Display',
-    'Lora',
-    'PT+Serif',
-    'EB+Garamond',
-    'Libre+Baskerville',
-    'JetBrains+Mono',
-    'Fira+Code',
-    'Source+Code+Pro',
-    'Oswald',
-    'Bebas+Neue',
-    'Dancing+Script',
-    'Pacifico',
-    'Caveat',
-  ];
+  // 1. Batch-load all Google Fonts (400 preview weights in chunks of 25 so every font in the dropdown renders its real preview)
+  const allGoogleFamilies = FONT_CATALOG.filter((f) => f.source === 'google' && f.googleFamily).map(
+    (f) => f.googleFamily!
+  );
+  const chunkSize = 25;
+  for (let i = 0; i < allGoogleFamilies.length; i += chunkSize) {
+    const chunk = allGoogleFamilies.slice(i, i + chunkSize);
+    const linkId = `docium-gfonts-bundle-${i}`;
+    if (document.getElementById(linkId)) continue;
+    const familyParams = chunk.map((fam) => `family=${fam}`).join('&');
+    const link = document.createElement('link');
+    link.id = linkId;
+    link.rel = 'stylesheet';
+    link.href = `https://fonts.googleapis.com/css2?${familyParams}&display=swap`;
+    document.head.appendChild(link);
+  }
 
-  popularFamilies.forEach((fam) => loadedGoogleFamilies.add(fam));
-
-  const linkId = 'docium-gfonts-popular-bundle';
-  if (document.getElementById(linkId)) return;
-
-  const familyParams = popularFamilies
-    .map((fam) => `family=${fam}:wght@400;600;700`)
-    .join('&');
-  const link = document.createElement('link');
-  link.id = linkId;
-  link.rel = 'stylesheet';
-  link.href = `https://fonts.googleapis.com/css2?${familyParams}&display=swap`;
-  document.head.appendChild(link);
+  // 2. Register `@font-face` rules backed by `/api/fonts/ttf` for all non-Google Microsoft Office / CloudFont / System fonts
+  const styleId = 'docium-catalog-font-faces';
+  let styleEl = document.getElementById(styleId) as HTMLStyleElement | null;
+  if (!styleEl) {
+    styleEl = document.createElement('style');
+    styleEl.id = styleId;
+    document.head.appendChild(styleEl);
+  }
+  const rules: string[] = [];
+  for (const entry of FONT_CATALOG) {
+    if (entry.source === 'google') continue;
+    const key = entry.name.toLowerCase();
+    if (WINDOWS_CORE_LOCAL_FAMILIES.has(key) || loadedLocalCatalogFamilies.has(key)) continue;
+    loadedLocalCatalogFamilies.add(key);
+    rules.push(buildCatalogFontFaceCss(entry));
+  }
+  if (rules.length > 0) {
+    styleEl.appendChild(document.createTextNode('\n' + rules.join('\n')));
+  }
 }
 

@@ -41,6 +41,7 @@ export interface ToolExecutionContext {
   accountId?: string;
   requestId?: string;
   toolCallId?: string;
+  abortSignal?: AbortSignal;
 }
 
 export interface ToolResult {

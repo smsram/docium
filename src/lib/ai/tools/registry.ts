@@ -152,8 +152,17 @@ export async function executeTool(
   toolName: string,
   args: Record<string, unknown>,
   context: ToolExecutionContext,
-  timeoutMs = 12000
+  timeoutMs?: number
 ): Promise<ToolResult> {
+  const effectiveTimeoutMs =
+    typeof timeoutMs === 'number'
+      ? timeoutMs
+      : toolName === 'inspect_source_image' ||
+        toolName === 'generate_image' ||
+        toolName === 'web_search' ||
+        toolName === 'inspect_source_styles'
+      ? 45000
+      : 15000;
   const catalogTool = getCatalogTool(toolName);
   const tool = catalogTool || getToolByName(toolName);
   if (!tool) {
@@ -241,13 +250,18 @@ export async function executeTool(
 
   try {
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    const timer = setTimeout(() => controller.abort(), effectiveTimeoutMs);
 
-    const executionPromise = tool.execute(args, context);
+    const execContext: ToolExecutionContext = {
+      ...context,
+      abortSignal: controller.signal,
+    };
+
+    const executionPromise = tool.execute(args, execContext);
     const result = await Promise.race([
       executionPromise,
       new Promise<ToolResult>((_, reject) =>
-        controller.signal.addEventListener('abort', () => reject(new Error(`Tool ${toolName} execution timed out`)))
+        controller.signal.addEventListener('abort', () => reject(new Error(`Tool ${toolName} execution timed out after ${Math.round(effectiveTimeoutMs / 1000)}s`)))
       ),
     ]);
 

@@ -18,7 +18,7 @@ export interface IndexedImageRecord {
   slide?: number;
   contentHash: string;
   perceptualHash: string;
-  analysisStatus: 'pending' | 'analyzed' | 'failed';
+  analysisStatus: 'pending' | 'analyzed' | 'pending_vision' | 'failed';
   analysisModel?: string;
   analyzedAt?: string;
   // Structured image metadata & understanding
@@ -30,6 +30,19 @@ export interface IndexedImageRecord {
   keywords: string[];
   semanticTags: string[];
   aiGeneratedDescription: string;
+}
+
+export interface ImageAnalysisPayload {
+  mainSubjects: string[];
+  objectsAndDetails: string;
+  ocrText: string;
+  hasChartsOrDiagrams: boolean;
+  chartOrTableData?: string;
+  keywords: string[];
+  semanticTags: string[];
+  aiGeneratedDescription: string;
+  analysisModel?: string;
+  isRealVision?: boolean;
 }
 
 // In-memory registries for indexed images
@@ -127,99 +140,74 @@ export function findCachedImageAnalysis(
 }
 
 /**
- * Heuristic/vision extraction of structured visual metadata from image filename and contents.
+ * Builds an honest, non-hallucinated metadata placeholder when no VLM provider/key is available at upload time.
+ * Visual analysis will instead run lazily on demand via inspect_source_image when requested.
  */
 export function generateStructuredImageDescription(
-  filename: string,
-  dataUrl?: string
-): {
-  mainSubjects: string[];
-  objectsAndDetails: string;
-  ocrText: string;
-  hasChartsOrDiagrams: boolean;
-  chartOrTableData?: string;
-  keywords: string[];
-  semanticTags: string[];
-  aiGeneratedDescription: string;
-} {
-  const cleanName = filename.replace(/\.[a-zA-Z0-9]+$/, '').replace(/[-_]+/g, ' ');
-  const isChart = /\b(chart|graph|plot|distribution|trend|revenue|metric|kpi|sales|growth)\b/i.test(cleanName);
-  const isDiagram = /\b(diagram|flow|architecture|topology|schema|wireframe|system|workflow)\b/i.test(cleanName);
-  const isScreenshot = /\b(screenshot|ui|screen|dashboard|modal|interface)\b/i.test(cleanName);
-
-  let subjects = [cleanName];
-  if (isChart) subjects = ['Data Visualization', 'Statistical Chart', cleanName];
-  else if (isDiagram) subjects = ['System Architecture', 'Technical Diagram', cleanName];
-  else if (isScreenshot) subjects = ['User Interface', 'Application Screenshot', cleanName];
-
+  filename: string
+): ImageAnalysisPayload {
+  const cleanName = filename.replace(/\.[a-zA-Z0-9]+$/, '').replace(/[-_]+/g, ' ').trim() || filename;
   const keywords = Array.from(
-    new Set([
-      ...cleanName.toLowerCase().split(/\s+/).filter((w) => w.length > 2),
-      ...(isChart ? ['chart', 'analytics', 'metrics', 'trends'] : []),
-      ...(isDiagram ? ['diagram', 'architecture', 'flow', 'components'] : []),
-      ...(isScreenshot ? ['ui', 'interface', 'layout', 'design'] : []),
-    ])
+    new Set(cleanName.toLowerCase().split(/\s+/).filter((w) => w.length > 2))
   );
 
-  const ocrText = isChart
-    ? `Title: ${cleanName} | Metrics: Growth, Retention, Monthly Active Users | Legend: Q1 to Q4`
-    : isDiagram
-    ? `Overview: ${cleanName} | Components: API Gateway -> Microservices -> Vector Database`
-    : `Visual display of ${cleanName} with labeled components and structured sections.`;
-
-  const details = isChart
-    ? `High-fidelity graphical chart illustrating numerical distributions, series data, and labeled axes for ${cleanName}.`
-    : isDiagram
-    ? `Technical architectural diagram showing interconnected modules, data pipelines, and service dependencies for ${cleanName}.`
-    : `High-resolution visual asset featuring ${cleanName} with distinct sections, typography, and interface elements.`;
-
-  const description = `[AI-Generated Visual Description - Not Document Text]\nVisual Asset: ${filename}\nCategory: ${
-    isChart ? 'Chart' : isDiagram ? 'Diagram' : 'Illustration'
-  }\nKey Subjects: ${subjects.join(', ')}\nDetails: ${details}\nOCR Text: ${ocrText}`;
-
   return {
-    mainSubjects: subjects,
-    objectsAndDetails: details,
-    ocrText,
-    hasChartsOrDiagrams: isChart || isDiagram,
-    chartOrTableData: isChart ? 'Q1: 120k, Q2: 185k, Q3: 240k, Q4: 310k' : undefined,
+    mainSubjects: [cleanName],
+    objectsAndDetails: `Uploaded image asset "${filename}". Visual analysis deferred until inspection.`,
+    ocrText: '',
+    hasChartsOrDiagrams: false,
     keywords,
-    semanticTags: isChart ? ['data', 'chart', 'finance'] : isDiagram ? ['tech', 'architecture'] : ['media'],
-    aiGeneratedDescription: description,
+    semanticTags: ['image', 'pending-vision'],
+    aiGeneratedDescription: `Image "${filename}" uploaded and ready for visual inspection via inspect_source_image.`,
+    analysisModel: undefined,
+    isRealVision: false,
   };
 }
 
 /**
- * Registers an image record and indexes it into the semantic retrieval engine.
+ * Registers an image record in in-memory registries without overwriting persisted chunks.
+ */
+export function registerImageRecordOnly(record: IndexedImageRecord): void {
+  imageRegistry.set(record.id, record);
+  if (record.analysisStatus === 'analyzed') {
+    contentHashToId.set(record.contentHash, record.id);
+    if (record.perceptualHash) {
+      perceptualHashToId.set(record.perceptualHash, record.id);
+    }
+  }
+}
+
+/**
+ * Registers an image record and indexes its description/OCR into the hybrid retrieval engine.
  */
 export function registerAndIndexImageRecord(
   record: IndexedImageRecord,
   workspaceId: string
 ): void {
-  imageRegistry.set(record.id, record);
-  contentHashToId.set(record.contentHash, record.id);
-  perceptualHashToId.set(record.perceptualHash, record.id);
+  registerImageRecordOnly(record);
 
-  // Convert to SemanticChunk for vector/hybrid retrieval
-  const chunkText = `${record.aiGeneratedDescription}\nKeywords: ${record.keywords.join(', ')}\nOCR: ${record.ocrText || 'None'}`;
-  const chunk: SemanticChunk = {
-    id: `chk-img-${record.id}`,
-    sourceId: record.sourceId || record.id,
-    sourceTitle: record.filename,
-    documentId: workspaceId,
-    heading: `Visual Asset: ${record.filename}`,
-    section: 'Images & Visual References',
-    page: record.page || 1,
-    slide: record.slide,
-    contentType: 'image_description',
-    imageReferences: [record.id],
-    text: chunkText,
-    contentHash: record.contentHash,
-    indexProfile: 'local-384',
-    indexedAt: new Date().toISOString(),
-  };
+  // Only emit semantic chunk when real vision text or OCR exists (never pollute vector index with empty stubs)
+  if (record.analysisStatus === 'analyzed') {
+    const chunkText = `[Image Summary: ${record.filename}]\n${record.aiGeneratedDescription}\nKeywords: ${record.keywords.join(', ')}${record.ocrText ? `\nOCR Text:\n${record.ocrText}` : ''}`;
+    const chunk: SemanticChunk = {
+      id: `chk-img-${record.id}`,
+      sourceId: record.sourceId || record.id,
+      sourceTitle: record.filename,
+      documentId: workspaceId,
+      heading: `Visual Asset: ${record.filename}`,
+      section: 'Images & Visual References',
+      page: record.page || 1,
+      slide: record.slide,
+      contentType: 'image_description',
+      imageReferences: [record.id],
+      text: chunkText,
+      contentHash: record.contentHash,
+      indexProfile: 'local-384',
+      indexedAt: new Date().toISOString(),
+    };
 
-  registerChunks(workspaceId, [chunk]);
+    registerChunks(workspaceId, [chunk]);
+  }
 }
 
 export interface ImageToProcess {
@@ -241,55 +229,59 @@ export interface BatchProcessingResult {
   failedCount: number;
 }
 
+export interface ProcessImagesBatchOptions {
+  concurrency?: number;
+  visionAnalyzer?: (img: ImageToProcess) => Promise<ImageAnalysisPayload | null>;
+  persistedCacheLookup?: (contentHash: string, perceptualHash?: string) => Partial<IndexedImageRecord> | null;
+  onRecordIndexed?: (record: IndexedImageRecord) => void;
+}
+
 /**
- * Processes multiple images in batches (max 4 per batch).
- * Checks hashes, reuses cached descriptions for unchanged images,
- * and analyzes new or changed images without duplicating successful work.
+ * Processes single or multiple images using content/perceptual hash deduplication
+ * and bounded parallel VLM captioning when a visionAnalyzer callback is provided.
  */
 export async function processImagesBatch(
   images: ImageToProcess[],
   workspaceId: string,
-  onActivity?: (message: string) => void
+  onActivity?: (message: string) => void,
+  options?: ProcessImagesBatchOptions
 ): Promise<BatchProcessingResult> {
   const result: IndexedImageRecord[] = [];
   let cachedCount = 0;
   let newCount = 0;
   let failedCount = 0;
 
-  // Process in verified batches of up to 4 images
-  const batchSize = 4;
-  for (let b = 0; b < images.length; b += batchSize) {
-    const batch = images.slice(b, b + batchSize);
+  const concurrency = Math.max(1, Math.min(options?.concurrency ?? 3, 5));
 
-    for (const img of batch) {
-      try {
-        const data = img.dataUrl || img.fileUrl || img.filename;
-        const contentHash = computeImageContentHash(data);
-        const perceptualHash = computePerceptualHash(data);
+  const processOne = async (img: ImageToProcess): Promise<void> => {
+    try {
+      const data = img.dataUrl || img.fileUrl || img.filename;
+      const contentHash = computeImageContentHash(data);
+      const perceptualHash = computePerceptualHash(data);
 
-        // Check if already analyzed
-        const cached = findCachedImageAnalysis(contentHash, perceptualHash);
-        if (cached) {
-          cachedCount++;
-          const reusedRecord: IndexedImageRecord = {
-            ...cached.record,
-            id: img.id || cached.record.id,
-            sourceId: img.sourceId || cached.record.sourceId,
-            workspaceId,
-            page: img.page ?? cached.record.page,
-            slide: img.slide ?? cached.record.slide,
-          };
-          registerAndIndexImageRecord(reusedRecord, workspaceId);
-          result.push(reusedRecord);
-          continue;
-        }
+      // 1. Exact or perceptual in-memory cache hit
+      const memCached = findCachedImageAnalysis(contentHash, perceptualHash);
+      if (memCached && memCached.record.analysisStatus === 'analyzed') {
+        cachedCount++;
+        const reusedRecord: IndexedImageRecord = {
+          ...memCached.record,
+          id: img.id || memCached.record.id,
+          sourceId: img.sourceId || memCached.record.sourceId,
+          workspaceId,
+          page: img.page ?? memCached.record.page,
+          slide: img.slide ?? memCached.record.slide,
+        };
+        registerAndIndexImageRecord(reusedRecord, workspaceId);
+        options?.onRecordIndexed?.(reusedRecord);
+        result.push(reusedRecord);
+        return;
+      }
 
-        // Fresh image analysis
-        newCount++;
-        onActivity?.(`Analyzing image ${newCount}: ${img.filename}...`);
-
-        const analysis = generateStructuredImageDescription(img.filename, img.dataUrl);
-        const newRecord: IndexedImageRecord = {
+      // 2. Persisted disk cache lookup (content-addressed across reloads)
+      const diskCached = options?.persistedCacheLookup?.(contentHash, perceptualHash);
+      if (diskCached && diskCached.analysisStatus === 'analyzed' && diskCached.aiGeneratedDescription) {
+        cachedCount++;
+        const reusedRecord: IndexedImageRecord = {
           id: img.id,
           sourceId: img.sourceId,
           workspaceId,
@@ -302,25 +294,76 @@ export async function processImagesBatch(
           contentHash,
           perceptualHash,
           analysisStatus: 'analyzed',
-          analysisModel: 'vision-sub-model-fast',
-          analyzedAt: new Date().toISOString(),
-          mainSubjects: analysis.mainSubjects,
-          objectsAndDetails: analysis.objectsAndDetails,
-          ocrText: analysis.ocrText,
-          hasChartsOrDiagrams: analysis.hasChartsOrDiagrams,
-          chartOrTableData: analysis.chartOrTableData,
-          keywords: analysis.keywords,
-          semanticTags: analysis.semanticTags,
-          aiGeneratedDescription: analysis.aiGeneratedDescription,
+          analysisModel: diskCached.analysisModel,
+          analyzedAt: diskCached.analyzedAt || new Date().toISOString(),
+          mainSubjects: diskCached.mainSubjects || [img.filename],
+          objectsAndDetails: diskCached.objectsAndDetails || diskCached.aiGeneratedDescription,
+          ocrText: diskCached.ocrText,
+          hasChartsOrDiagrams: Boolean(diskCached.hasChartsOrDiagrams),
+          chartOrTableData: diskCached.chartOrTableData,
+          keywords: diskCached.keywords || [],
+          semanticTags: diskCached.semanticTags || ['media'],
+          aiGeneratedDescription: diskCached.aiGeneratedDescription,
         };
-
-        registerAndIndexImageRecord(newRecord, workspaceId);
-        result.push(newRecord);
-      } catch (err: unknown) {
-        failedCount++;
-        console.error(`Failed to analyze image ${img.filename}:`, err);
+        registerAndIndexImageRecord(reusedRecord, workspaceId);
+        result.push(reusedRecord);
+        return;
       }
+
+      // 3. Real VLM captioning (if configured) or honest pending_vision metadata
+      newCount++;
+      onActivity?.(`Analyzing image ${newCount}: ${img.filename}...`);
+
+      let analysis: ImageAnalysisPayload | null = null;
+      if (options?.visionAnalyzer && (img.dataUrl || img.fileUrl)) {
+        try {
+          analysis = await options.visionAnalyzer(img);
+        } catch (visErr) {
+          console.warn(`[DOCIUM Image Understanding] VLM captioning skipped for ${img.filename}:`, visErr);
+        }
+      }
+
+      const isAnalyzed = Boolean(analysis && analysis.isRealVision !== false);
+      const resolvedAnalysis = analysis || generateStructuredImageDescription(img.filename);
+
+      const newRecord: IndexedImageRecord = {
+        id: img.id,
+        sourceId: img.sourceId,
+        workspaceId,
+        filename: img.filename,
+        mimeType: img.mimeType || 'image/png',
+        fileUrl: img.fileUrl,
+        dataUrl: img.dataUrl,
+        page: img.page,
+        slide: img.slide,
+        contentHash,
+        perceptualHash,
+        analysisStatus: isAnalyzed ? 'analyzed' : 'pending_vision',
+        analysisModel: isAnalyzed ? (resolvedAnalysis.analysisModel || 'vision-model') : undefined,
+        analyzedAt: isAnalyzed ? new Date().toISOString() : undefined,
+        mainSubjects: resolvedAnalysis.mainSubjects,
+        objectsAndDetails: resolvedAnalysis.objectsAndDetails,
+        ocrText: resolvedAnalysis.ocrText,
+        hasChartsOrDiagrams: resolvedAnalysis.hasChartsOrDiagrams,
+        chartOrTableData: resolvedAnalysis.chartOrTableData,
+        keywords: resolvedAnalysis.keywords,
+        semanticTags: resolvedAnalysis.semanticTags,
+        aiGeneratedDescription: resolvedAnalysis.aiGeneratedDescription,
+      };
+
+      registerAndIndexImageRecord(newRecord, workspaceId);
+      options?.onRecordIndexed?.(newRecord);
+      result.push(newRecord);
+    } catch (err: unknown) {
+      failedCount++;
+      console.error(`Failed to analyze image ${img.filename}:`, err);
     }
+  };
+
+  // Run single or bounded parallel pool across the batch
+  for (let b = 0; b < images.length; b += concurrency) {
+    const slice = images.slice(b, b + concurrency);
+    await Promise.all(slice.map((img) => processOne(img)));
   }
 
   return {

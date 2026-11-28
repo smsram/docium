@@ -278,7 +278,7 @@ export const ActivityTimeline = memo(
     if (!isGenerating && !hasEvents && !error) return null;
 
     return (
-      <div className="w-full mb-3 select-text" role="region" aria-label="Agent working">
+      <div className="w-full mb-1 select-text" role="region" aria-label="Agent working">
         {/* ── Parent header toggle: Working v / Working > ───────────────────── */}
         <button
           type="button"

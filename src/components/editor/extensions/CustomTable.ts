@@ -53,7 +53,7 @@ declare module '@tiptap/core' {
       setCellBackground: (color: string | null) => ReturnType;
       setCellVerticalAlign: (align: 'top' | 'middle' | 'bottom') => ReturnType;
       setCellBorderStyle: (borderStyle: 'solid' | 'dashed' | 'none', borderColor?: string) => ReturnType;
-      applyTableStylePreset: (preset: 'grid' | 'forest' | 'striped' | 'minimal' | 'executive') => ReturnType;
+      applyTableStylePreset: (preset: 'grid' | 'forest' | 'striped' | 'minimal' | 'executive' | 'navy' | 'slate') => ReturnType;
     };
   }
 }
@@ -68,6 +68,18 @@ const sharedCellAttributes = {
       return {
         'data-bg-color': attributes.backgroundColor,
         style: `background-color: ${attributes.backgroundColor}`,
+      };
+    },
+  },
+  textColor: {
+    default: null,
+    parseHTML: (element: HTMLElement) =>
+      element.getAttribute('data-text-color') || element.style.color || null,
+    renderHTML: (attributes: Record<string, any>) => {
+      if (!attributes.textColor) return {};
+      return {
+        'data-text-color': attributes.textColor,
+        style: `color: ${attributes.textColor}`,
       };
     },
   },
@@ -177,30 +189,41 @@ export const CustomTable = Table.extend({
             row.forEach((cell: any, cellOffset: number) => {
               const cellPos = tablePos + 1 + rowOffset + 1 + cellOffset;
               let bg: string | null = null;
+              let fg: string | null = null;
               let bStyle: string = 'solid';
               let bColor: string = '#cbd5e1';
 
               if (preset === 'forest') {
                 bg = isFirstRow ? '#245C45' : rowIdx % 2 === 0 ? '#F4F8F6' : '#FFFFFF';
+                fg = isFirstRow ? '#FFFFFF' : '#171C19';
                 bColor = '#B7D1C5';
+              } else if (preset === 'navy') {
+                bg = isFirstRow ? '#1E3A8A' : rowIdx % 2 === 0 ? '#EFF6FF' : '#FFFFFF';
+                fg = isFirstRow ? '#FFFFFF' : '#171C19';
+                bColor = '#CBD5E1';
               } else if (preset === 'striped') {
                 bg = isFirstRow ? '#E2E8F0' : rowIdx % 2 === 0 ? '#F8FAFC' : '#FFFFFF';
+                fg = '#171C19';
                 bColor = '#CBD5E1';
               } else if (preset === 'minimal') {
                 bg = isFirstRow ? '#F8FAFC' : null;
+                fg = '#171C19';
                 bStyle = 'none';
                 bColor = '#E2E8F0';
-              } else if (preset === 'executive') {
+              } else if (preset === 'executive' || preset === 'slate') {
                 bg = isFirstRow ? '#1E293B' : rowIdx % 2 === 0 ? '#F8FAFC' : '#FFFFFF';
+                fg = isFirstRow ? '#FFFFFF' : '#171C19';
                 bColor = '#CBD5E1';
               } else {
                 bg = isFirstRow ? '#F1F5F3' : null;
+                fg = '#171C19';
                 bColor = '#CBD5E1';
               }
 
               tr.setNodeMarkup(cellPos, undefined, {
                 ...cell.attrs,
                 backgroundColor: bg,
+                textColor: fg,
                 borderStyle: bStyle,
                 borderColor: bColor,
               });

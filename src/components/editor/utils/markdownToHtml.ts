@@ -77,6 +77,22 @@ export function convertMarkdownAndLatexToHtml(rawInput: string): string {
 }
 
 /**
+ * Removes whitespace text nodes between HTML table structural tags (<table>, <thead>, <tbody>,
+ * <tfoot>, <tr>, <th>, <td>) so ProseMirror's DOMParser never creates phantom blank rows or columns
+ * when ingesting formatted/indented HTML tables.
+ */
+export function sanitizeTableHtmlWhitespace(html: string): string {
+  if (!html || !/<table\b/i.test(html)) return html;
+  return html.replace(/<table\b[\s\S]*?<\/table>/gi, (tableBlock) =>
+    tableBlock
+      .replace(/(<\/?(?:table|thead|tbody|tfoot|colgroup|col|tr)\b[^>]*>)\s+(?=<)/gi, '$1')
+      .replace(/>\s+(<\/?(?:table|thead|tbody|tfoot|colgroup|col|tr|th|td)\b[^>]*>)/gi, '>$1')
+      .replace(/(<(?:th|td)\b[^>]*>)\s+(?=<(?:p|div|ul|ol|h[1-6]|\/th|\/td)\b)/gi, '$1')
+      .replace(/(<\/(?:p|div|ul|ol|h[1-6])>)\s+(<\/(?:th|td)>)/gi, '$1$2')
+  );
+}
+
+/**
  * Checks whether text is already structured HTML (e.g. starts with <p>, <h1>, <div>, <table>).
  */
 export function isHtmlContent(content: string): boolean {
@@ -111,7 +127,7 @@ export function convertMarkdownToDocumentHtml(mdOrHtml: string): string {
   const raw = mdOrHtml.trim();
 
   if (isHtmlContent(raw)) {
-    return raw;
+    return sanitizeTableHtmlWhitespace(raw);
   }
 
   let clean = raw;
@@ -335,5 +351,6 @@ export function convertMarkdownToDocumentHtml(mdOrHtml: string): string {
     }
   }
 
-  return htmlParts.length > 0 ? htmlParts.join('') : `<p>${formatInline(escapeHtml(clean))}</p>`;
+  const out = htmlParts.length > 0 ? htmlParts.join('') : `<p>${formatInline(escapeHtml(clean))}</p>`;
+  return sanitizeTableHtmlWhitespace(out);
 }

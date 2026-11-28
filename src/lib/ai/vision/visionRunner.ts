@@ -17,7 +17,8 @@ import { resolveProviderAdapter } from '../adapters/registry';
 import { NormalizedMessage } from '../adapters/base';
 import { parseCloudflarePairs } from '../credentials';
 import { normalizeCloudflareAccountId, normalizeCloudflareModelId, normalizeBase64DataUrl } from '../adapters/cloudflare';
-import { validateImageBuffer } from '../pdf/pdfService';
+import { validateImageBuffer, optimizeImageBufferForVision } from '../pdf/pdfService';
+import type { ImageAnalysisPayload } from '../images/imageUnderstanding';
 
 export type VisionErrorCategory =
   | 'AUTHENTICATION_ERROR'
@@ -171,6 +172,14 @@ export async function executeVisionInspection(
           error: `Image validation failed for "${img.filename}": ${val.error}`,
         };
       }
+      // Optimize oversized images before sending to vision provider
+      const opt = await optimizeImageBufferForVision(rawBuf, cleanMime, { maxDimension: 1568, maxBytes: 900 * 1024 });
+      if (opt.compressed) {
+        img.mimeType = opt.mimeType;
+        img.dataUrl = `data:${opt.mimeType};base64,${opt.buffer.toString('base64')}`;
+        img.byteLength = opt.buffer.length;
+        continue;
+      }
     }
 
     img.dataUrl = normalizedDataUrl;
@@ -263,10 +272,12 @@ ${userInstruction}`;
 
     // 5. Execute multimodal inspection through the normalized provider adapter
     const adapter = resolveProviderAdapter(providerId);
+    const isQwenModel = /qwen/i.test(modelId);
+    const finalVisionPrompt = isQwenModel ? `/no_think\n${systemVisionPrompt}\n/no_think` : systemVisionPrompt;
     const normalizedMessages: NormalizedMessage[] = [
       {
         role: 'user',
-        content: systemVisionPrompt,
+        content: finalVisionPrompt,
         images: images.map((img) => img.dataUrl),
       },
     ];
@@ -420,6 +431,66 @@ function formatVisionModelAnalysis(
     extractedText,
     visualDescription,
     observations,
+  };
+}
+
+/**
+ * Generates a concise structured Image Card summary & OCR extraction once at upload/index time
+ * using the configured vision model so chat turns don't need raw images re-sent repeatedly.
+ */
+export async function captionImageForIndex(
+  image: VisionImageInput,
+  options: VisionRunnerOptions
+): Promise<ImageAnalysisPayload | null> {
+  const captionPrompt = `Analyze this image once for document indexing and retrieval.
+Return STRICT JSON (no markdown fences) with these keys:
+{
+  "summary": "2-3 sentence accurate visual summary of what the image shows",
+  "mainSubjects": ["short subject 1", "short subject 2"],
+  "ocrText": "all clearly legible text, labels, table numbers, headings, or code in the image verbatim",
+  "hasChartsOrDiagrams": true or false,
+  "chartOrTableData": "key data points or axis values if chart/table else empty string",
+  "keywords": ["5-10 searchable keywords"],
+  "semanticTags": ["2-4 category tags such as chart, diagram, ui, document, photo"]
+}`;
+
+  const res = await executeVisionInspection([image], captionPrompt, options);
+  if (!res.success || !res.analysis) return null;
+
+  const rawText = res.analysis.extractedText || res.analysis.visualDescription || '';
+  const jsonMatch = rawText.match(/\{[\s\S]*\}/);
+  if (jsonMatch) {
+    try {
+      const parsed = JSON.parse(jsonMatch[0]);
+      const summary = String(parsed.summary || res.analysis.visualDescription || '').trim();
+      const ocrText = String(parsed.ocrText || '').trim();
+      return {
+        mainSubjects: Array.isArray(parsed.mainSubjects) && parsed.mainSubjects.length > 0 ? parsed.mainSubjects.map(String) : [image.filename],
+        objectsAndDetails: summary || `Visual summary of ${image.filename}`,
+        ocrText,
+        hasChartsOrDiagrams: Boolean(parsed.hasChartsOrDiagrams),
+        chartOrTableData: parsed.chartOrTableData ? String(parsed.chartOrTableData) : undefined,
+        keywords: Array.isArray(parsed.keywords) ? parsed.keywords.map(String) : [],
+        semanticTags: Array.isArray(parsed.semanticTags) ? parsed.semanticTags.map(String) : ['visual'],
+        aiGeneratedDescription: summary || res.analysis.extractedText.slice(0, 600),
+        analysisModel: options.modelId,
+        isRealVision: true,
+      };
+    } catch {
+      // Fallback to text parsing below
+    }
+  }
+
+  return {
+    mainSubjects: [image.filename],
+    objectsAndDetails: res.analysis.visualDescription || rawText.slice(0, 400),
+    ocrText: res.analysis.extractedText,
+    hasChartsOrDiagrams: /chart|diagram|graph|table|flowchart/i.test(rawText),
+    keywords: [],
+    semanticTags: ['visual'],
+    aiGeneratedDescription: (res.analysis.visualDescription || rawText).slice(0, 800),
+    analysisModel: options.modelId,
+    isRealVision: true,
   };
 }
 

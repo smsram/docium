@@ -49,6 +49,7 @@ import {
   Indent,
   EquationNode,
   InlineEquationNode,
+  FindReplaceHighlight,
 } from './extensions';
 
 // Subcomponents
@@ -124,7 +125,12 @@ export function DocumentEditor({ documentId, showBackToHome = false }: DocumentE
   const [footerAlign, setFooterAlign] = useState<'left' | 'center' | 'right'>(doc?.footerAlign || 'left');
   const [firstPageHeaderText, setFirstPageHeaderText] = useState(doc?.firstPageHeaderText || '');
   const [firstPageFooterText, setFirstPageFooterText] = useState(doc?.firstPageFooterText || '');
+  const [showHeaderLine, setShowHeaderLine] = useState(doc?.showHeaderLine ?? false);
+  const [showFooterLine, setShowFooterLine] = useState(doc?.showFooterLine ?? false);
   const [showPageNumbers, setShowPageNumbers] = useState(doc?.showPageNumbers ?? false);
+  const [pageNumberPosition, setPageNumberPosition] = useState<'bottom-center' | 'bottom-right' | 'top-right'>(
+    doc?.pageNumberPosition || 'bottom-right'
+  );
   const [differentFirstPage, setDifferentFirstPage] = useState(doc?.differentFirstPage ?? false);
   const [watermarkText, setWatermarkText] = useState(doc?.watermarkText || '');
   const [pageColor, setPageColor] = useState(doc?.pageColor || '#FFFFFF');
@@ -209,7 +215,10 @@ export function DocumentEditor({ documentId, showBackToHome = false }: DocumentE
     footerAlign: 'left' | 'center' | 'right';
     firstPageHeaderText: string;
     firstPageFooterText: string;
+    showHeaderLine: boolean;
+    showFooterLine: boolean;
     showPageNumbers: boolean;
+    pageNumberPosition: 'bottom-center' | 'bottom-right' | 'top-right';
     differentFirstPage: boolean;
     watermarkText: string;
     pageColor: string;
@@ -235,7 +244,10 @@ export function DocumentEditor({ documentId, showBackToHome = false }: DocumentE
       footerAlign,
       firstPageHeaderText,
       firstPageFooterText,
+      showHeaderLine,
+      showFooterLine,
       showPageNumbers,
+      pageNumberPosition,
       differentFirstPage,
       watermarkText,
       pageColor,
@@ -256,7 +268,10 @@ export function DocumentEditor({ documentId, showBackToHome = false }: DocumentE
       footerAlign,
       firstPageHeaderText,
       firstPageFooterText,
+      showHeaderLine,
+      showFooterLine,
       showPageNumbers,
+      pageNumberPosition,
       differentFirstPage,
       watermarkText,
       pageColor,
@@ -280,7 +295,10 @@ export function DocumentEditor({ documentId, showBackToHome = false }: DocumentE
       setFooterAlign(snap.footerAlign);
       setFirstPageHeaderText(snap.firstPageHeaderText);
       setFirstPageFooterText(snap.firstPageFooterText);
+      setShowHeaderLine(snap.showHeaderLine);
+      setShowFooterLine(snap.showFooterLine);
       setShowPageNumbers(snap.showPageNumbers);
+      setPageNumberPosition(snap.pageNumberPosition);
       setDifferentFirstPage(snap.differentFirstPage);
       setWatermarkText(snap.watermarkText);
       setPageColor(snap.pageColor);
@@ -373,6 +391,7 @@ export function DocumentEditor({ documentId, showBackToHome = false }: DocumentE
       TextBox,
       EquationNode,
       InlineEquationNode,
+      FindReplaceHighlight,
     ],
     content: doc?.contentJson || (doc?.content !== undefined ? doc.content : '<p></p>'),
     immediatelyRender: false,
@@ -860,6 +879,52 @@ export function DocumentEditor({ documentId, showBackToHome = false }: DocumentE
       if (editor) {
         editor.commands.setContent(result.html);
       }
+      if (result.metadata) {
+        const m = result.metadata;
+        if (m.pageSize) setPageSize(m.pageSize);
+        if (m.orientation) setOrientation(m.orientation);
+        if (m.margins) {
+          setMargins(m.margins);
+          setMarginPreset('custom');
+        }
+        if (m.columns) setColumns(m.columns);
+        if (m.pageColor) setPageColor(m.pageColor);
+        if (m.pageBorder) setPageBorder(m.pageBorder);
+        if (m.pageBorderColor) setPageBorderColor(m.pageBorderColor);
+        if (m.pageBorderWidth) setPageBorderWidth(m.pageBorderWidth);
+        if (m.pageBorderOffset) setPageBorderOffset(m.pageBorderOffset);
+        if (m.differentFirstPage !== undefined) setDifferentFirstPage(m.differentFirstPage);
+        if (m.headerText !== undefined) setHeaderText(m.headerText);
+        if (m.firstPageHeaderText !== undefined) setFirstPageHeaderText(m.firstPageHeaderText);
+        if (m.footerText !== undefined) setFooterText(m.footerText);
+        if (m.firstPageFooterText !== undefined) setFirstPageFooterText(m.firstPageFooterText);
+        if (m.headerAlign) setHeaderAlign(m.headerAlign);
+        if (m.footerAlign) setFooterAlign(m.footerAlign);
+        if (m.showHeaderLine !== undefined) setShowHeaderLine(m.showHeaderLine);
+        if (m.showFooterLine !== undefined) setShowFooterLine(m.showFooterLine);
+        if (m.showPageNumbers !== undefined) setShowPageNumbers(m.showPageNumbers);
+        updateDocument(documentId, {
+          ...(m.pageSize ? { pageSize: m.pageSize } : {}),
+          ...(m.orientation ? { orientation: m.orientation } : {}),
+          ...(m.margins ? { margins: m.margins, marginPreset: 'custom' as const } : {}),
+          ...(m.columns ? { columns: m.columns } : {}),
+          ...(m.pageColor ? { pageColor: m.pageColor } : {}),
+          ...(m.pageBorder ? { pageBorder: m.pageBorder } : {}),
+          ...(m.pageBorderColor ? { pageBorderColor: m.pageBorderColor } : {}),
+          ...(m.pageBorderWidth ? { pageBorderWidth: m.pageBorderWidth } : {}),
+          ...(m.pageBorderOffset ? { pageBorderOffset: m.pageBorderOffset } : {}),
+          ...(m.differentFirstPage !== undefined ? { differentFirstPage: m.differentFirstPage } : {}),
+          ...(m.headerText !== undefined ? { headerText: m.headerText } : {}),
+          ...(m.firstPageHeaderText !== undefined ? { firstPageHeaderText: m.firstPageHeaderText } : {}),
+          ...(m.footerText !== undefined ? { footerText: m.footerText } : {}),
+          ...(m.firstPageFooterText !== undefined ? { firstPageFooterText: m.firstPageFooterText } : {}),
+          ...(m.headerAlign ? { headerAlign: m.headerAlign } : {}),
+          ...(m.footerAlign ? { footerAlign: m.footerAlign } : {}),
+          ...(m.showHeaderLine !== undefined ? { showHeaderLine: m.showHeaderLine } : {}),
+          ...(m.showFooterLine !== undefined ? { showFooterLine: m.showFooterLine } : {}),
+          ...(m.showPageNumbers !== undefined ? { showPageNumbers: m.showPageNumbers } : {}),
+        });
+      }
       if (result.title) {
         handleTitleChange(result.title);
       }
@@ -879,6 +944,8 @@ export function DocumentEditor({ documentId, showBackToHome = false }: DocumentE
     footerText?: string;
     firstPageHeaderText?: string;
     firstPageFooterText?: string;
+    showHeaderLine?: boolean;
+    showFooterLine?: boolean;
     showPageNumbers?: boolean;
     differentFirstPage?: boolean;
   }) => {
@@ -891,6 +958,8 @@ export function DocumentEditor({ documentId, showBackToHome = false }: DocumentE
     if (settings.footerText !== undefined) setFooterText(settings.footerText);
     if (settings.firstPageHeaderText !== undefined) setFirstPageHeaderText(settings.firstPageHeaderText);
     if (settings.firstPageFooterText !== undefined) setFirstPageFooterText(settings.firstPageFooterText);
+    if (settings.showHeaderLine !== undefined) setShowHeaderLine(settings.showHeaderLine);
+    if (settings.showFooterLine !== undefined) setShowFooterLine(settings.showFooterLine);
     if (settings.showPageNumbers !== undefined) setShowPageNumbers(settings.showPageNumbers);
     if (settings.differentFirstPage !== undefined) setDifferentFirstPage(settings.differentFirstPage);
 
@@ -904,6 +973,8 @@ export function DocumentEditor({ documentId, showBackToHome = false }: DocumentE
       footerText: settings.footerText,
       firstPageHeaderText: settings.firstPageHeaderText,
       firstPageFooterText: settings.firstPageFooterText,
+      showHeaderLine: settings.showHeaderLine,
+      showFooterLine: settings.showFooterLine,
       showPageNumbers: settings.showPageNumbers,
       differentFirstPage: settings.differentFirstPage,
     });
@@ -941,7 +1012,7 @@ export function DocumentEditor({ documentId, showBackToHome = false }: DocumentE
   const isAiDocked = aiPanelMode === 'docked';
 
   return (
-    <div className="flex flex-col h-full bg-[var(--background)] overflow-hidden">
+    <div className="docium-editor-shell flex flex-col h-full bg-[var(--background)] overflow-hidden">
       {/* Floating Exit Focus Mode Pill */}
       {isFocusMode && (
         <div className="fixed top-4 right-6 z-[90] flex items-center gap-2.5 rounded-full border border-[var(--border)] bg-[var(--surface)]/95 backdrop-blur-md px-3.5 py-1.5 shadow-xl text-xs font-medium text-[var(--text)] select-none animate-in fade-in slide-in-from-top-2 duration-150">
@@ -997,21 +1068,48 @@ export function DocumentEditor({ documentId, showBackToHome = false }: DocumentE
               columns,
               headerText,
               footerText,
+              headerAlign,
+              footerAlign,
               firstPageHeaderText,
               firstPageFooterText,
+              showHeaderLine,
+              showFooterLine,
               showPageNumbers,
+              pageNumberPosition,
               differentFirstPage,
               watermarkText,
               pageColor,
               pageBorder,
+              pageBorderColor,
+              pageBorderWidth,
+              pageBorderOffset,
             })
           }
           onExportPdf={() =>
             void exportToPdf(title, {
+              jsonContent: editor?.getJSON() as Record<string, any> | undefined,
+              htmlContent: editor?.getHTML(),
               pageSize,
               orientation,
               margins,
+              columns,
+              headerText,
+              footerText,
+              headerAlign,
+              footerAlign,
+              firstPageHeaderText,
+              firstPageFooterText,
+              showHeaderLine,
+              showFooterLine,
+              showPageNumbers,
+              pageNumberPosition,
+              differentFirstPage,
+              watermarkText,
               pageColor,
+              pageBorder,
+              pageBorderColor,
+              pageBorderWidth,
+              pageBorderOffset,
             })
           }
           onPrint={() =>
@@ -1147,7 +1245,7 @@ export function DocumentEditor({ documentId, showBackToHome = false }: DocumentE
       )}
 
       {/* 4. Main Workspace Editing Layout */}
-      <div className="flex flex-1 overflow-hidden relative">
+      <div className="docium-editor-body flex flex-1 overflow-hidden relative">
         {/* Left Navigation Outline */}
         <DocumentOutline
           editor={editor}
@@ -1156,7 +1254,7 @@ export function DocumentEditor({ documentId, showBackToHome = false }: DocumentE
         />
 
         {/* Center Canvas Column with Synchronized Horizontal Top Ruler */}
-        <div className="flex-1 flex flex-col overflow-hidden relative">
+        <div className="docium-center-column flex-1 flex flex-col overflow-hidden relative">
           {showRuler && !isFocusMode && (
             <DocumentRuler
               pageDimensions={pageDimensions}
@@ -1170,7 +1268,7 @@ export function DocumentEditor({ documentId, showBackToHome = false }: DocumentE
           )}
 
           {/* Document Workspace Row: Vertical Ruler + Paginated Document Sheet Canvas */}
-          <div className="flex flex-1 min-h-0 overflow-hidden">
+          <div className="docium-canvas-row flex flex-1 min-h-0 overflow-hidden">
             {showRuler && !isFocusMode && (
               <VerticalRuler
                 pageDimensions={pageDimensions}
@@ -1219,6 +1317,8 @@ export function DocumentEditor({ documentId, showBackToHome = false }: DocumentE
               setFirstPageFooterText(txt);
               updateDocument(documentId, { firstPageFooterText: txt });
             }}
+            showHeaderLine={showHeaderLine}
+            showFooterLine={showFooterLine}
             showPageNumbers={showPageNumbers}
             differentFirstPage={differentFirstPage}
             onToggleDifferentFirstPage={() => {
@@ -1332,11 +1432,21 @@ export function DocumentEditor({ documentId, showBackToHome = false }: DocumentE
               columns,
               headerText,
               footerText,
+              headerAlign,
+              footerAlign,
+              firstPageHeaderText,
+              firstPageFooterText,
+              showHeaderLine,
+              showFooterLine,
               showPageNumbers,
+              pageNumberPosition,
               differentFirstPage,
               watermarkText,
               pageColor,
               pageBorder,
+              pageBorderColor,
+              pageBorderWidth,
+              pageBorderOffset,
               wordCount: documentStats.wordCount,
               characterCount: documentStats.characterCount,
               readingTime: Math.max(1, Math.ceil(documentStats.wordCount / 200)),
@@ -1348,19 +1458,131 @@ export function DocumentEditor({ documentId, showBackToHome = false }: DocumentE
             };
           }}
           onApplyEditorAction={async (action, payload) => {
+            if (action === 'editor_undo') {
+              handleUnifiedUndo();
+              return { success: true, documentId, action, summary: 'Undid last change' };
+            }
+            if (action === 'editor_redo') {
+              handleUnifiedRedo();
+              return { success: true, documentId, action, summary: 'Redid last change' };
+            }
+
+            if (action === 'export_document') {
+              const format = String(payload.format || 'pdf').toLowerCase();
+              const exportTitle = String(payload.title || title || 'Untitled Document');
+              if (format === 'pdf') {
+                await exportToPdf(exportTitle, {
+                  jsonContent: editor?.getJSON() as Record<string, any> | undefined,
+                  htmlContent: editor?.getHTML(),
+                  pageSize,
+                  orientation,
+                  margins,
+                  columns,
+                  headerText,
+                  footerText,
+                  headerAlign,
+                  footerAlign,
+                  firstPageHeaderText,
+                  firstPageFooterText,
+                  showPageNumbers,
+                  pageNumberPosition,
+                  differentFirstPage,
+                  watermarkText,
+                  pageColor,
+                  pageBorder,
+                  pageBorderColor,
+                  pageBorderWidth,
+                  pageBorderOffset,
+                });
+              } else if (format === 'print') {
+                triggerPrintPdf({ title: exportTitle, pageSize, orientation, margins });
+              } else if (format === 'docx') {
+                await exportToDocx(exportTitle, editor?.getHTML() || doc?.content || '', {
+                  jsonContent: editor?.getJSON(),
+                  pageSize,
+                  orientation,
+                  margins,
+                  columns,
+                  headerText,
+                  footerText,
+                  headerAlign,
+                  footerAlign,
+                  firstPageHeaderText,
+                  firstPageFooterText,
+                  showHeaderLine,
+                  showFooterLine,
+                  showPageNumbers,
+                  pageNumberPosition,
+                  differentFirstPage,
+                  watermarkText,
+                  pageColor,
+                  pageBorder,
+                  pageBorderColor,
+                  pageBorderWidth,
+                  pageBorderOffset,
+                });
+              } else if (format === 'html') {
+                exportToHtml(exportTitle, editor?.getHTML() || doc?.content || '');
+              } else if (format === 'txt') {
+                exportToPlainText(exportTitle, editor?.getHTML() || doc?.content || '');
+              } else if (format === 'md' || format === 'markdown') {
+                exportToMarkdown(exportTitle, editor?.getHTML() || doc?.content || '');
+              }
+              return {
+                success: true,
+                documentId,
+                action,
+                summary: `Triggered ${format.toUpperCase()} download for "${exportTitle}"`,
+              };
+            }
+
+            if (action === 'set_document_view') {
+              if (typeof payload.zoomLevel === 'number') setZoomLevel(Math.max(50, Math.min(250, payload.zoomLevel)));
+              if (payload.viewMode === 'paginated') setIsPaginatedView(true);
+              if (payload.viewMode === 'continuous') setIsPaginatedView(false);
+              if (typeof payload.showRuler === 'boolean') setShowRuler(payload.showRuler);
+              if (typeof payload.showOutline === 'boolean') setOutlinePanelOpen(payload.showOutline);
+              if (typeof payload.showFormattingMarks === 'boolean') setShowFormattingMarks(payload.showFormattingMarks);
+              if (typeof payload.focusMode === 'boolean') handleToggleFocusMode(payload.focusMode);
+              return { success: true, documentId, action, summary: 'Updated document view settings' };
+            }
+
+            if (action === 'set_editor_preferences') {
+              if (typeof payload.suggestingMode === 'boolean') setSuggestingMode(payload.suggestingMode);
+              if (typeof payload.spellCheckEnabled === 'boolean') setSpellCheckEnabled(payload.spellCheckEnabled);
+              if (typeof payload.commentsSidebarOpen === 'boolean') setCommentsSidebarOpen(payload.commentsSidebarOpen);
+              return { success: true, documentId, action, summary: 'Updated editor review settings' };
+            }
+
             if (action === 'modify_page_layout') {
+              recordLayoutUndoPoint();
               if (payload.pageSize) setPageSize(payload.pageSize as DocumentPageSize);
               if (payload.orientation) setOrientation(payload.orientation as DocumentOrientation);
               if (payload.marginPreset) setMarginPreset(payload.marginPreset as MarginPreset);
-              if (payload.margins) setMargins(payload.margins as DocumentMargins);
+              if (payload.margins) {
+                const resolved = typeof payload.margins === 'string'
+                  ? getResolvedMargins(payload.margins as MarginPreset)
+                  : (payload.margins as DocumentMargins);
+                setMargins(resolved);
+              }
               if (payload.columns) setColumns(Number(payload.columns) as 1 | 2 | 3);
               if (payload.headerText !== undefined) setHeaderText(String(payload.headerText));
               if (payload.footerText !== undefined) setFooterText(String(payload.footerText));
+              if (payload.headerAlign !== undefined) setHeaderAlign(payload.headerAlign as 'left' | 'center' | 'right');
+              if (payload.footerAlign !== undefined) setFooterAlign(payload.footerAlign as 'left' | 'center' | 'right');
+              if (payload.firstPageHeaderText !== undefined) setFirstPageHeaderText(String(payload.firstPageHeaderText));
+              if (payload.firstPageFooterText !== undefined) setFirstPageFooterText(String(payload.firstPageFooterText));
+              if (payload.showHeaderLine !== undefined) setShowHeaderLine(Boolean(payload.showHeaderLine));
+              if (payload.showFooterLine !== undefined) setShowFooterLine(Boolean(payload.showFooterLine));
               if (payload.showPageNumbers !== undefined) setShowPageNumbers(Boolean(payload.showPageNumbers));
+              if (payload.pageNumberPosition !== undefined) setPageNumberPosition(payload.pageNumberPosition as 'bottom-center' | 'bottom-right' | 'top-right');
               if (payload.differentFirstPage !== undefined) setDifferentFirstPage(Boolean(payload.differentFirstPage));
               if (payload.watermarkText !== undefined) setWatermarkText(String(payload.watermarkText));
               if (payload.pageColor !== undefined) setPageColor(String(payload.pageColor));
-              if (payload.pageBorder !== undefined) setPageBorder(payload.pageBorder as any);
+              if (payload.pageBorder !== undefined) setPageBorder(payload.pageBorder as 'none' | 'box' | 'shadow' | 'double' | 'accent');
+              if (payload.pageBorderColor !== undefined) setPageBorderColor(String(payload.pageBorderColor));
+              if (payload.pageBorderWidth !== undefined) setPageBorderWidth(Number(payload.pageBorderWidth));
+              if (payload.pageBorderOffset !== undefined) setPageBorderOffset(payload.pageBorderOffset as 'edge' | 'margin' | 'wide');
             }
 
             return editorRegistry.executeAction(
@@ -1372,15 +1594,30 @@ export function DocumentEditor({ documentId, showBackToHome = false }: DocumentE
                 if (updates.pageSize) setPageSize(updates.pageSize);
                 if (updates.orientation) setOrientation(updates.orientation);
                 if (updates.marginPreset) setMarginPreset(updates.marginPreset);
-                if (updates.margins) setMargins(updates.margins);
+                if (updates.margins) {
+                  const resolved = typeof updates.margins === 'string'
+                    ? getResolvedMargins(updates.margins as MarginPreset)
+                    : updates.margins;
+                  setMargins(resolved);
+                }
                 if (updates.columns) setColumns(updates.columns);
                 if (updates.headerText !== undefined) setHeaderText(updates.headerText);
                 if (updates.footerText !== undefined) setFooterText(updates.footerText);
+                if (updates.headerAlign !== undefined) setHeaderAlign(updates.headerAlign);
+                if (updates.footerAlign !== undefined) setFooterAlign(updates.footerAlign);
+                if (updates.firstPageHeaderText !== undefined) setFirstPageHeaderText(updates.firstPageHeaderText);
+                if (updates.firstPageFooterText !== undefined) setFirstPageFooterText(updates.firstPageFooterText);
+                if (updates.showHeaderLine !== undefined) setShowHeaderLine(updates.showHeaderLine);
+                if (updates.showFooterLine !== undefined) setShowFooterLine(updates.showFooterLine);
                 if (updates.showPageNumbers !== undefined) setShowPageNumbers(updates.showPageNumbers);
+                if (updates.pageNumberPosition !== undefined) setPageNumberPosition(updates.pageNumberPosition);
                 if (updates.differentFirstPage !== undefined) setDifferentFirstPage(updates.differentFirstPage);
                 if (updates.watermarkText !== undefined) setWatermarkText(updates.watermarkText);
                 if (updates.pageColor !== undefined) setPageColor(updates.pageColor);
                 if (updates.pageBorder !== undefined) setPageBorder(updates.pageBorder);
+                if (updates.pageBorderColor !== undefined) setPageBorderColor(updates.pageBorderColor);
+                if (updates.pageBorderWidth !== undefined) setPageBorderWidth(updates.pageBorderWidth);
+                if (updates.pageBorderOffset !== undefined) setPageBorderOffset(updates.pageBorderOffset);
                 updateDocument(id, updates);
                 setSaveStatus('saved');
               }
@@ -1413,6 +1650,8 @@ export function DocumentEditor({ documentId, showBackToHome = false }: DocumentE
         footerText={footerText}
         firstPageHeaderText={firstPageHeaderText}
         firstPageFooterText={firstPageFooterText}
+        showHeaderLine={showHeaderLine}
+        showFooterLine={showFooterLine}
         showPageNumbers={showPageNumbers}
         differentFirstPage={differentFirstPage}
         onSave={handleSavePageSetup}

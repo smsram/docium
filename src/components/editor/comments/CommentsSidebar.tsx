@@ -61,7 +61,7 @@ export function CommentsSidebar({
   };
 
   return (
-    <aside className="w-80 border-l border-[var(--border)] bg-[var(--surface)] flex flex-col shrink-0 text-xs shadow-lg z-20">
+    <aside className="print:hidden w-80 border-l border-[var(--border)] bg-[var(--surface)] flex flex-col shrink-0 text-xs shadow-lg z-20">
       {/* Header */}
       <div className="flex h-12 items-center justify-between px-4 border-b border-[var(--border)] bg-[var(--surface-elevated)] shrink-0">
         <div className="flex items-center gap-2">

@@ -152,7 +152,7 @@ export async function ingestSource(
       message: `Extracting text & hierarchy from ${source.title}...`,
     });
 
-    // Register and automatically analyze embedded images if present
+    // Register embedded image references (and analyze only if not already pre-analyzed on server upload)
     if (source.extractedImages && source.extractedImages.length > 0) {
       registerDocumentImages(
         source.extractedImages.map((img, idx) => ({
@@ -167,19 +167,26 @@ export async function ingestSource(
         }))
       );
 
-      await processImagesBatch(
-        source.extractedImages.map((img) => ({
-          id: img.id,
-          sourceId: source.id,
-          filename: img.caption || `${source.title}-image-${img.id}`,
-          fileUrl: img.url,
-          dataUrl: img.url.startsWith('data:') ? img.url : undefined,
-          page: img.page,
-          workspaceId: documentId,
-        })),
-        documentId,
-        (msg) => onProgress?.({ stage: 'extracting', progressPercent: 25, message: msg })
-      );
+      const alreadyAnalyzedInCards =
+        Array.isArray(source.imageCards) &&
+        source.imageCards.length > 0 &&
+        source.imageCards.every((c) => c.analysisStatus === 'analyzed' || c.analysisStatus === 'pending_vision');
+
+      if (!alreadyAnalyzedInCards) {
+        await processImagesBatch(
+          source.extractedImages.map((img) => ({
+            id: img.id,
+            sourceId: source.id,
+            filename: img.caption || `${source.title}-image-${img.id}`,
+            fileUrl: img.url,
+            dataUrl: img.url.startsWith('data:') ? img.url : undefined,
+            page: img.page,
+            workspaceId: documentId,
+          })),
+          documentId,
+          (msg) => onProgress?.({ stage: 'extracting', progressPercent: 25, message: msg })
+        );
+      }
     }
 
     const textToChunk =

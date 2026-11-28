@@ -134,7 +134,7 @@ Bulk operations should be efficient (e.g. batch formatting all headings or parag
 Progress across rounds is tracked automatically in the Task Progress Ledger—do NOT spend turns or tokens manually calling scratchpad tools unless explicitly asked.
 Destructive modifications require appropriate authorization: for ambiguous requests, ask one concise clarification instead of guessing a destructive scope.
 All modifications must be verified and persisted in document state before claiming success.
-Unsupported operations (such as footnotes, bookmarks, sheet cells, slide decks) must be reported honestly; charts, shapes, text boxes, mathematical equations, and watermarks ARE supported via document tools.
+Unsupported operations (such as footnotes, bookmarks, sheet cells, slide decks) must be reported honestly; Mermaid visual diagrams (insert_diagram), charts, shapes, text boxes, mathematical equations, and watermarks ARE supported via document tools.
 Do not use tools from another workspace merely because they have similar names.
 Do not modify unrelated files without authorization.
 
@@ -200,27 +200,53 @@ Never claim an action succeeded without verification.`;
 - Note: Always evaluate temporal expressions ("today", "yesterday", "recently", "latest", "this year", "current") relative to this runtime date (${currentDateStr}).`;
 
   // ── WORKSPACE CONTEXT & SCOPE ──────────────────────────────────────────────
+  const formatSourceManifestEntry = (s: ResearchSource): string => {
+    const metaParts: string[] = [`Source ID: "${s.id}"`, `Type: ${s.type || s.mimeType}`];
+    if (s.pageCount) metaParts.push(`Pages: ${s.pageCount}`);
+    if (s.visualPages && s.visualPages.length > 0) {
+      metaParts.push(`Visual/Diagram Pages: [${s.visualPages.slice(0, 12).join(', ')}${s.visualPages.length > 12 ? ', ...' : ''}]`);
+    }
+    if (s.sheetNames && s.sheetNames.length > 0) metaParts.push(`Sheets: ${s.sheetNames.join(', ')}`);
+    if (s.outline && s.outline.length > 0) {
+      metaParts.push(`Outline: ${s.outline.slice(0, 6).join(' | ')}`);
+    }
+
+    let line = `  * "${s.title}" (${metaParts.join(', ')})`;
+
+    // Include real cached VLM Image Cards / visual descriptions cleanly so follow-up turns do not need raw images re-sent
+    const analyzedCard = s.imageCards?.find((c) => c.analysisStatus === 'analyzed' && c.caption);
+    const cachedDesc = s.imageDescription || analyzedCard?.caption;
+    if (cachedDesc && (s.type === 'image' || s.imageCards?.some((c) => c.analysisStatus === 'analyzed'))) {
+      line += `\n      Cached Visual Summary: ${cachedDesc.slice(0, 260).replace(/\s+/g, ' ')}`;
+      const ocr = s.ocrText || analyzedCard?.ocrText;
+      if (ocr) {
+        line += `\n      Cached OCR Preview: ${ocr.slice(0, 220).replace(/\s+/g, ' ')}`;
+      }
+    }
+    return line;
+  };
+
   prompt += `\n\nWORKSPACE CONTEXT
 - Active Workspace ID: ${workspaceId}
 - Workspace Format: ${cleanWsType.toUpperCase()}
 - Active Document Title: ${activeDocument?.title || (cleanWsType === 'doc' ? 'Untitled' : 'None')}
 - Workspace Files Available: ${workspaceFiles.map((f) => `"${f.title}" (${f.type})`).join(', ') || 'None'}
 - Attached Sources:
-${attachedSources.map((s) => `  * "${s.title}" (Source ID: "${s.id}", Type: ${s.type || s.mimeType})`).join('\n') || '  None'}${
+${attachedSources.map(formatSourceManifestEntry).join('\n') || '  None'}${
     explicitSourceIds.length > 0
       ? `\n- Explicitly Mentioned Sources (@attach): ${attachedSources
           .filter((s) => explicitSourceIds.includes(s.id))
           .map((s) => `"${s.title}" (ID: "${s.id}")`)
-          .join(', ')} (PRIORITY 1 - Base your answers primarily on these referenced files)`
+          .join(', ')} (PRIORITY 1 - Base your answers/styling primarily on these referenced files. Call inspect_source_styles if matching a file's styling/layout, read_source_content / read_pdf_page for text, or inspect_source_image when visual inspection is required.)`
       : ''
   }${
     attachedSources.some(
       (s) => s.type === 'image' || s.mimeType?.startsWith('image/') || s.title.match(/\.(jpe?g|png|webp|gif|svg)$/i)
     )
-      ? `\n- Attached Images Ready for Visual Inspection:
+      ? `\n- Attached Images Available (call "inspect_source_image" if you need full pixel-level reading/transcription beyond cached summary):
 ${attachedSources
   .filter((s) => s.type === 'image' || s.mimeType?.startsWith('image/') || s.title.match(/\.(jpe?g|png|webp|gif|svg)$/i))
-  .map((s) => `  * "${s.title}" -> Call "inspect_source_image" with sourceId: "${s.id}"`)
+  .map((s) => `  * "${s.title}" -> sourceId: "${s.id}"`)
   .join('\n')}`
       : ''
   }`;
@@ -254,9 +280,15 @@ ${headingsOutline}
   * Page Size: ${doc?.pageSize || 'A4'}
   * Orientation: ${doc?.orientation || 'portrait'}
   * Columns: ${doc?.columns || 1}
-  * Running Header: ${doc?.headerText || 'None'}
-  * Running Footer: ${doc?.footerText || 'None'}
+  * Running Header (all or pages 2+): ${doc?.headerText || 'None'}
+  * First Page Header (when Different First Page enabled): ${doc?.firstPageHeaderText || 'None'}
+  * Running Footer (all or pages 2+): ${doc?.footerText || 'None'}
+  * First Page Footer (when Different First Page enabled): ${doc?.firstPageFooterText || 'None'}
+  * Different First Page Enabled: ${doc?.differentFirstPage ? 'Yes' : 'No'}
   * Page Numbers: ${doc?.showPageNumbers ? 'Enabled' : 'Disabled'}
+  * Page Color: ${doc?.pageColor || '#FFFFFF'}
+  * Page Border: ${doc?.pageBorder || 'none'}
+  * Watermark: ${doc?.watermarkText || 'None'}
 
 CRITICAL ARCHITECTURAL RULES:
 1. STRICT PERMISSION BOUNDARY: You have permission to modify ONLY the currently active document ("${doc?.title || 'Untitled'}", ID: "${doc?.id || 'active'}").
@@ -269,7 +301,14 @@ CRITICAL ARCHITECTURAL RULES:
 3. CONTEXT-AWARE TARGETING:
    - If the user refers to "this", "the selection", or "selected text", target the active selection.
    - For clearing a page's content, use clear_current_page.
-   - For finding and replacing text or phrases, use replace_text or find_document_content.
+   - For finding and replacing text, multi-line regions, code blocks, or replacing any element with Markdown/LaTeX/diagrams/"" (deletion), use replace_content (with targetText, startText+endText, blockType+containsText, or headingTitle) or replace_text / find_document_content.
+   - For restyling an existing table's colors, header shading, zebra striping, borders, or bold first column, ALWAYS use "style_table" (presets: navy, forest, executive, slate, striped, grid, minimal, plus custom colors) instead of replacing the table with raw HTML.
+   - For converting text/ASCII diagrams or creating flowcharts, architectures, sequences, or timelines, use insert_diagram (Mermaid syntax) with in-place replacement anchors (replaceTargetText, replaceStartText+replaceEndText, replaceBlockContaining) or placement anchors (afterHeading, afterText). Batch multiple diagram calls into ONE round!
+   - For Ribbon page design, layout, headers/footers, and direct exports:
+     * Page borders: use set_page_borders (borderStyle: box/shadow/double/accent/none, borderColor, borderWidth, borderOffset).
+     * Different First Page / First-Page-Only Title in Header: use update_header with "firstPageHeaderText" (for page 1), "headerText" (for remaining pages 2+; pass "" to leave pages 2+ blank), and "differentFirstPage: true". Use delete_header with "scope: 'remaining_pages'" to clear headers from pages 2+ while preserving page 1.
+     * Page color, columns, margins, orientation, size, watermark, page numbers: use set_page_color, set_page_columns, set_page_margins, set_page_orientation, set_page_size, insert_watermark, insert_page_numbers.
+     * Direct downloads: use export_as_pdf, export_as_docx, export_as_html, export_as_txt, export_as_markdown, or print_document to trigger an immediate file download in the user's browser.
    - If a targeting request is genuinely ambiguous, ask one concise clarifying question before applying destructive edits.
 4. OUTLINE & LAYOUT SYNCHRONIZATION:
    - All headings and structural changes you apply directly update the document's real-time outline and page layout.
@@ -281,13 +320,16 @@ CRITICAL ARCHITECTURAL RULES:
    - Verify the document state using verify_document_state.
    - Return a concise, clean completion confirmation in the chat bubble (e.g. "I have prepared and styled the requested document in **[Document]**.").
    - NEVER dump or duplicate the full inserted document text, code blocks, or raw source extracts into the chat response when the primary action was placing it into the document.
-6. TOKEN-EFFICIENT THINKING & FAST 2-ROUND EXECUTION (CRITICAL):
+6. TOKEN-EFFICIENT THINKING & FLEXIBLE SINGLE- OR MULTI-ROUND EXECUTION (CRITICAL):
    - Keep your internal thinking/reasoning strictly under 60 words—only a brief 2-4 bullet tool checklist.
-   - NEVER draft or write out Markdown skeletons, headings, tables, or document text inside your thinking/reasoning phase! Drafting in thinking wastes token budget and risks cutting off before tool calls are emitted.
-   - Write the full document Markdown ONLY ONCE directly inside the "insert_text" tool call argument.
-   - Use this fast 2-round execution pattern for new/rewritten documents:
-     * Round 1: Run "clear_current_page" (if replacing existing content) + "insert_text" (complete Markdown with headings, tables, callouts, lists) + any "insert_chart" calls (use "afterHeading" or default "end" position) in parallel.
-     * Round 2: Run the styling batch ("format_all_headings", "set_font_family", "set_line_spacing", "set_text_alignment") + "verify_document_state" in parallel, then reply concisely.
+   - NEVER draft or write out full Markdown skeletons, tables, or document prose inside your thinking/reasoning block! Write document content ONLY ONCE inside tool arguments.
+   - For short or standard documents: use the fast 2-round pattern:
+     * Round 1: "clear_current_page" (if replacing existing content) + "insert_text" (complete Markdown) + any "insert_chart" calls.
+     * Round 2: Styling batch ("format_all_headings", "set_font_family", "set_line_spacing", "set_text_alignment") + "verify_document_state", then reply concisely.
+   - For LARGE or multi-section documents (e.g., many long exam answers, comprehensive study guides, lengthy multi-part reports > ~1,800 words): split placement cleanly across multiple sequential tool rounds inside this turn so nothing gets truncated:
+     * Round 1: "clear_current_page" (if replacing) + "insert_text" with Title + Part 1 (e.g., first 2-3 sections).
+     * Round 2..N: "append_content" (or "insert_text" with position: "end") for each subsequent section/answer chunk cleanly without repeating prior headings.
+     * Final Round: Apply document-wide styling ("format_all_headings", "set_font_family", "set_line_spacing", "set_text_alignment") + "verify_document_state", then confirm concisely.
 ================================================================================`;
   }
 

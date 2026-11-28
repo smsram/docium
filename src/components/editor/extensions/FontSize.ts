@@ -35,6 +35,12 @@ export const FontSize = Mark.create({
     return [
       {
         style: 'font-size',
+        getAttrs: (value) => {
+          if (typeof value !== 'string' || !value.trim()) return false;
+          const raw = value.replace(/['"]+/g, '').trim();
+          if (!raw) return false;
+          return { size: normalizeFontSizeToPt(raw) };
+        },
       },
     ];
   },

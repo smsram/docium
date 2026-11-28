@@ -30,8 +30,9 @@ import {
   exportToDocx,
   exportToHtml,
   exportToPlainText,
+  exportToMarkdown,
 } from '@/components/editor/utils/exportDocx';
-import { triggerPrintPdf } from '@/components/editor/utils/exportPdf';
+import { exportToPdf, triggerPrintPdf } from '@/components/editor/utils/exportPdf';
 import {
   DocumentPageSize,
   DocumentOrientation,
@@ -40,6 +41,74 @@ import {
   ActiveDocumentHeading,
 } from '@/lib/types';
 import { convertMarkdownToDocumentHtml } from '@/components/editor/utils/markdownToHtml';
+import { validateActionAgainstActiveDoc } from '@/lib/editor/shadowDocEngine';
+
+const UNIVERSAL_ANCHOR_PROPERTIES: Record<string, { type: string; description: string; enum?: string[] }> = {
+  position: {
+    type: 'string',
+    enum: ['cursor', 'end', 'start', 'afterHeading', 'beforeHeading', 'afterText', 'beforeText', 'replaceTarget', 'endOfSection'],
+    description: 'Placement mode (defaults to cursor or end depending on tool).',
+  },
+  afterHeading: {
+    type: 'string',
+    description: 'Heading title to insert immediately after.',
+  },
+  beforeHeading: {
+    type: 'string',
+    description: 'Heading title to insert immediately before.',
+  },
+  afterText: {
+    type: 'string',
+    description: 'Text snippet to insert immediately after.',
+  },
+  beforeText: {
+    type: 'string',
+    description: 'Text snippet to insert immediately before.',
+  },
+  replaceTargetText: {
+    type: 'string',
+    description: 'Existing text/diagram snippet to remove and replace in-place with this element.',
+  },
+  replaceStartText: {
+    type: 'string',
+    description: 'Start anchor of a multi-line region/text diagram to replace in-place.',
+  },
+  replaceEndText: {
+    type: 'string',
+    description: 'End anchor of a multi-line region/text diagram to replace in-place.',
+  },
+  replaceBlockContaining: {
+    type: 'string',
+    description: 'Snippet inside a codeBlock/paragraph/block to remove and replace in-place.',
+  },
+  replaceBlockType: {
+    type: 'string',
+    enum: ['any', 'paragraph', 'codeBlock', 'blockquote', 'table', 'callout'],
+    description: 'Optional block type filter when using replaceBlockContaining.',
+  },
+};
+
+function pickAnchorPayload(args: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  const keys = [
+    'position',
+    'afterHeading',
+    'beforeHeading',
+    'afterText',
+    'beforeText',
+    'replaceTargetText',
+    'replaceStartText',
+    'replaceEndText',
+    'replaceBlockContaining',
+    'replaceBlockType',
+  ];
+  for (const k of keys) {
+    if (args[k] !== undefined && args[k] !== null && args[k] !== '') {
+      out[k] = args[k];
+    }
+  }
+  return out;
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Scope & Permission Helpers
@@ -411,6 +480,9 @@ export const insertImageTool: ToolCatalogEntry = {
       url: { type: 'string', description: 'Image asset URL or data URL.' },
       alt: { type: 'string', description: 'Accessible alternative text.' },
       title: { type: 'string', description: 'Image title / caption tooltip.' },
+      width: { type: 'number', description: 'Optional display width in px.' },
+      alignment: { type: 'string', enum: ['left', 'center', 'right'], description: 'Alignment.' },
+      ...UNIVERSAL_ANCHOR_PROPERTIES,
     },
     required: ['url'],
   },
@@ -422,7 +494,7 @@ export const insertImageTool: ToolCatalogEntry = {
 
     const res = await editorRegistry.executeAction(
       'insert_document_image',
-      { url, alt: args.alt, title: args.title },
+      { url, alt: args.alt, title: args.title, width: args.width, alignment: args.alignment, ...pickAnchorPayload(args) },
       val.docId
     );
     if (!res.success) return { success: false, error: res.error || 'Failed to insert image.' };
@@ -573,11 +645,7 @@ export const insertCodeBlockTool: ToolCatalogEntry = {
     properties: {
       code: { type: 'string', description: 'Source code content.' },
       language: { type: 'string', description: 'Programming language (e.g. python, typescript, javascript, json).' },
-      position: {
-        type: 'string',
-        enum: ['cursor', 'start', 'end', 'replace_selection'],
-        description: 'Where to insert the code block.',
-      },
+      ...UNIVERSAL_ANCHOR_PROPERTIES,
     },
     required: ['code'],
   },
@@ -588,7 +656,7 @@ export const insertCodeBlockTool: ToolCatalogEntry = {
     const language = String(args.language || 'python');
     const position = String(args.position || 'cursor');
 
-    const res = await editorRegistry.executeAction('insert_code_block', { code, language, position }, val.docId);
+    const res = await editorRegistry.executeAction('insert_code_block', { code, language, position, ...pickAnchorPayload(args) }, val.docId);
     if (!res.success) return { success: false, error: res.error || 'Failed to insert code block.' };
     return {
       success: true,
@@ -702,6 +770,7 @@ export const insertCalloutTool: ToolCatalogEntry = {
     properties: {
       type: { type: 'string', enum: ['info', 'tip', 'warning', 'danger', 'note'], description: 'Callout style type.' },
       content: { type: 'string', description: 'Callout text or HTML content.' },
+      ...UNIVERSAL_ANCHOR_PROPERTIES,
     },
     required: ['content'],
   },
@@ -711,7 +780,7 @@ export const insertCalloutTool: ToolCatalogEntry = {
     const calloutType = (args.type as 'info' | 'tip' | 'warning' | 'danger' | 'note') || 'info';
     const content = String(args.content || '');
 
-    const res = await editorRegistry.executeAction('insert_callout_box', { type: calloutType, content }, val.docId);
+    const res = await editorRegistry.executeAction('insert_callout_box', { type: calloutType, content, ...pickAnchorPayload(args) }, val.docId);
     if (!res.success) return { success: false, error: res.error || 'Failed to insert callout.' };
     return { success: true, data: { type: calloutType }, activitySummary: `Inserted ${calloutType} callout box` };
   },
@@ -1676,6 +1745,68 @@ export const replaceSectionTool: ToolCatalogEntry = {
   },
 };
 
+export const styleTableTool: ToolCatalogEntry = {
+  id: 'style_table',
+  name: 'style_table',
+  label: 'Style Table',
+  description:
+    'Style an existing table in-place (presets like navy, forest, executive, striped, grid, minimal, plus custom headerBg, headerTextColor, evenRowBg, oddRowBg, borderColor, boldFirstColumn) WITHOUT rebuilding or adding any extra rows/columns.',
+  category: 'table_management',
+  workspace: ['doc'],
+  risk: 'modifying',
+  availability: 'implemented',
+  aliases: ['apply_table_style', 'format table', 'restyle table', 'table theme', 'table colors', 'table borders'],
+  keywords: ['table', 'style', 'theme', 'preset', 'color', 'header', 'borders', 'shading', 'zebra', 'stripes'],
+  parameters: {
+    type: 'object',
+    properties: {
+      tableIndex: { type: 'number', description: '0-based index of the table in document (default 0).' },
+      containsText: { type: 'string', description: 'Optional text snippet inside the table to locate it accurately.' },
+      afterHeading: { type: 'string', description: 'Optional heading title containing the target table.' },
+      preset: {
+        type: 'string',
+        enum: ['navy', 'forest', 'executive', 'slate', 'striped', 'grid', 'minimal'],
+        description: 'Built-in visual theme preset.',
+      },
+      headerBg: { type: 'string', description: 'Header row background hex color (e.g. "#1E3A8A").' },
+      headerTextColor: { type: 'string', description: 'Header row text hex color (e.g. "#FFFFFF").' },
+      evenRowBg: { type: 'string', description: 'Alternating even row background hex color (e.g. "#EFF6FF").' },
+      oddRowBg: { type: 'string', description: 'Odd body row background hex color (e.g. "#FFFFFF").' },
+      borderColor: { type: 'string', description: 'Cell border hex color (e.g. "#CBD5E1").' },
+      borderStyle: { type: 'string', enum: ['solid', 'dashed', 'none'], description: 'Cell border style.' },
+      boldFirstColumn: { type: 'boolean', description: 'Whether to bold the first column labels in body rows.' },
+    },
+  },
+  execute: async (args, context) => {
+    const val = validateActiveDoc(context);
+    if (!val.ok) return { success: false, error: val.error };
+
+    const res = await editorRegistry.executeAction(
+      'style_table',
+      {
+        tableIndex: args.tableIndex,
+        containsText: args.containsText,
+        afterHeading: args.afterHeading,
+        preset: args.preset,
+        headerBg: args.headerBg,
+        headerTextColor: args.headerTextColor,
+        evenRowBg: args.evenRowBg,
+        oddRowBg: args.oddRowBg,
+        borderColor: args.borderColor,
+        borderStyle: args.borderStyle,
+        boldFirstColumn: args.boldFirstColumn,
+      },
+      val.docId
+    );
+    if (!res.success) return { success: false, error: res.error || 'Failed to style table.' };
+    return {
+      success: true,
+      data: { preset: args.preset || 'custom', styled: true },
+      activitySummary: `Styled table (${String(args.preset || 'custom')})`,
+    };
+  },
+};
+
 export const replaceTableTool: ToolCatalogEntry = {
   id: 'replace_table',
   name: 'replace_table',
@@ -2213,7 +2344,7 @@ export const formatAllHeadingsTool: ToolCatalogEntry = {
   id: 'format_all_headings',
   name: 'format_all_headings',
   label: 'Format All Headings',
-  description: 'Batch format headings across the document (e.g. dark green, 20pt, Arial).',
+  description: 'Batch format headings across the document (e.g. hex color "#1E3A8A", 18pt, Arial).',
   category: 'formatting',
   workspace: ['doc'],
   risk: 'modifying',
@@ -2222,7 +2353,7 @@ export const formatAllHeadingsTool: ToolCatalogEntry = {
     type: 'object',
     properties: {
       level: { type: 'number', description: 'Specific heading level to format (1-6, optional - omitted means all levels).' },
-      color: { type: 'string', description: 'Color (e.g. "#15803D", "darkgreen").' },
+      color: { type: 'string', description: 'Color (e.g. "#1E3A8A", "#15803D").' },
       fontSize: { type: 'number', description: 'Font size in pt/px (e.g. 20).' },
       fontFamily: { type: 'string', description: 'Font family name.' },
       alignment: { type: 'string', enum: ['left', 'center', 'right', 'justify'], description: 'Heading alignment.' },
@@ -2334,6 +2465,188 @@ export const removeFormattingTool: ToolCatalogEntry = {
     const res = await editorRegistry.executeAction('remove_formatting', { targetText: args.targetText }, val.docId);
     if (!res.success) return { success: false, error: res.error || 'Failed to remove formatting.' };
     return { success: true, data: { cleared: true }, activitySummary: 'Cleared text formatting' };
+  },
+};
+
+export const setSubscriptTool: ToolCatalogEntry = {
+  id: 'set_subscript',
+  name: 'set_subscript',
+  label: 'Toggle Subscript',
+  description: 'Toggle subscript formatting (e.g. H2O) on target text or active selection.',
+  category: 'formatting',
+  workspace: ['doc'],
+  risk: 'modifying',
+  availability: 'implemented',
+  aliases: ['subscript'],
+  keywords: ['subscript', 'sub', 'chemical', 'formula'],
+  parameters: {
+    type: 'object',
+    properties: {
+      targetText: { type: 'string', description: 'Optional target text to format as subscript.' },
+    },
+  },
+  execute: async (args, context) => {
+    const val = validateActiveDoc(context);
+    if (!val.ok) return { success: false, error: val.error };
+    const res = await editorRegistry.executeAction(
+      'format_document_text',
+      { formatting: 'subscript', targetText: args.targetText },
+      val.docId
+    );
+    if (!res.success) return { success: false, error: res.error || 'Failed to toggle subscript.' };
+    return { success: true, data: { subscript: true }, activitySummary: 'Toggled subscript formatting' };
+  },
+};
+
+export const setSuperscriptTool: ToolCatalogEntry = {
+  id: 'set_superscript',
+  name: 'set_superscript',
+  label: 'Toggle Superscript',
+  description: 'Toggle superscript formatting (e.g. x^2, 1st) on target text or active selection.',
+  category: 'formatting',
+  workspace: ['doc'],
+  risk: 'modifying',
+  availability: 'implemented',
+  aliases: ['superscript'],
+  keywords: ['superscript', 'sup', 'exponent', 'power'],
+  parameters: {
+    type: 'object',
+    properties: {
+      targetText: { type: 'string', description: 'Optional target text to format as superscript.' },
+    },
+  },
+  execute: async (args, context) => {
+    const val = validateActiveDoc(context);
+    if (!val.ok) return { success: false, error: val.error };
+    const res = await editorRegistry.executeAction(
+      'format_document_text',
+      { formatting: 'superscript', targetText: args.targetText },
+      val.docId
+    );
+    if (!res.success) return { success: false, error: res.error || 'Failed to toggle superscript.' };
+    return { success: true, data: { superscript: true }, activitySummary: 'Toggled superscript formatting' };
+  },
+};
+
+export const adjustIndentTool: ToolCatalogEntry = {
+  id: 'adjust_indent',
+  name: 'adjust_indent',
+  label: 'Increase or Decrease Indent',
+  description: 'Increase (indent) or decrease (outdent) paragraph or list item indentation.',
+  category: 'formatting',
+  workspace: ['doc'],
+  risk: 'modifying',
+  availability: 'implemented',
+  aliases: ['indent paragraph', 'outdent paragraph', 'increase indent', 'decrease indent'],
+  keywords: ['indent', 'outdent', 'tab', 'nesting'],
+  parameters: {
+    type: 'object',
+    properties: {
+      direction: { type: 'string', enum: ['indent', 'outdent'], description: 'Indent or outdent.' },
+      targetText: { type: 'string', description: 'Optional target paragraph or list text.' },
+    },
+    required: ['direction'],
+  },
+  execute: async (args, context) => {
+    const val = validateActiveDoc(context);
+    if (!val.ok) return { success: false, error: val.error };
+    const direction = args.direction === 'outdent' ? 'outdent' : 'indent';
+    const res = await editorRegistry.executeAction(
+      'adjust_indent',
+      { direction, targetText: args.targetText },
+      val.docId
+    );
+    if (!res.success) return { success: false, error: res.error || 'Failed to adjust indentation.' };
+    return { success: true, data: { direction }, activitySummary: direction === 'indent' ? 'Increased indentation' : 'Decreased indentation' };
+  },
+};
+
+export const changeTextCaseTool: ToolCatalogEntry = {
+  id: 'change_text_case',
+  name: 'change_text_case',
+  label: 'Change Text Case',
+  description: 'Transform selected or target text to UPPERCASE, lowercase, Title Case, or Sentence case.',
+  category: 'formatting',
+  workspace: ['doc'],
+  risk: 'modifying',
+  availability: 'implemented',
+  aliases: ['uppercase', 'lowercase', 'title case', 'sentence case', 'change case'],
+  keywords: ['case', 'uppercase', 'lowercase', 'titlecase', 'capitalize'],
+  parameters: {
+    type: 'object',
+    properties: {
+      caseType: {
+        type: 'string',
+        enum: ['uppercase', 'lowercase', 'titlecase', 'sentencecase'],
+        description: 'Target casing format.',
+      },
+      targetText: { type: 'string', description: 'Optional target text to transform.' },
+    },
+    required: ['caseType'],
+  },
+  execute: async (args, context) => {
+    const val = validateActiveDoc(context);
+    if (!val.ok) return { success: false, error: val.error };
+    const caseType = String(args.caseType || 'titlecase');
+    const res = await editorRegistry.executeAction(
+      'change_text_case',
+      { caseType, targetText: args.targetText },
+      val.docId
+    );
+    if (!res.success) return { success: false, error: res.error || 'Failed to change text case.' };
+    return { success: true, data: { caseType }, activitySummary: `Converted text to ${caseType}` };
+  },
+};
+
+export const insertCoverPageTool: ToolCatalogEntry = {
+  id: 'insert_cover_page',
+  name: 'insert_cover_page',
+  label: 'Insert Cover Page',
+  description: 'Insert a formatted cover page (executive, modern, or academic) followed by a page break at the start of the document.',
+  category: 'content_creation',
+  workspace: ['doc'],
+  risk: 'modifying',
+  availability: 'implemented',
+  aliases: ['add cover page', 'title page', 'front page'],
+  keywords: ['cover', 'title page', 'front page', 'executive', 'academic'],
+  parameters: {
+    type: 'object',
+    properties: {
+      style: { type: 'string', enum: ['executive', 'modern', 'academic'], description: 'Cover page design style.' },
+      title: { type: 'string', description: 'Cover page main title.' },
+      subtitle: { type: 'string', description: 'Optional subtitle or tagline.' },
+      author: { type: 'string', description: 'Optional author or department.' },
+    },
+  },
+  execute: async (args, context) => {
+    const val = validateActiveDoc(context);
+    if (!val.ok) return { success: false, error: val.error };
+    const style = (args.style as 'executive' | 'modern' | 'academic') || 'executive';
+    const coverTitle = String(args.title || context.activeDocument?.title || 'Document Title');
+    const subtitle = String(args.subtitle || 'Comprehensive Overview & Report');
+    const author = String(args.author || '');
+    const today = new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
+
+    const md =
+      style === 'academic'
+        ? `# ${coverTitle}\n\n*${subtitle}*\n\n${author ? `**Author:** ${author}\n\n` : ''}**Date:** ${today}\n\n---\n`
+        : `# ${coverTitle}\n\n### ${subtitle}\n\n${author ? `**Prepared By:** ${author}\n\n` : ''}**Date:** ${today}\n\n---\n`;
+
+    const res = await dispatchOrExecuteEditorAction(
+      context,
+      'prepend_to_document',
+      { content: md, isMarkdown: true },
+      val.docId,
+      `Inserted ${style} cover page`
+    );
+    if (!res.success) return { success: false, error: res.error || 'Failed to insert cover page.' };
+    await dispatchOrExecuteEditorAction(context, 'insert_document_page_break', { position: 'cursor' }, val.docId, 'Added cover page break');
+    return {
+      success: true,
+      data: { style, title: coverTitle },
+      activitySummary: `Inserted ${style} cover page`,
+      editorAction: res.editorAction,
+    };
   },
 };
 
@@ -2615,10 +2928,11 @@ export const navigateToContentTool: ToolCatalogEntry = {
   execute: async (args, context) => {
     const val = validateActiveDoc(context);
     if (!val.ok) return { success: false, error: val.error };
-    const heading = String(args.headingText || args.searchText || '');
+    const heading = String(args.headingText || '');
+    const searchText = args.searchText ? String(args.searchText) : undefined;
 
-    const res = await editorRegistry.executeAction('navigate_to_document_heading', { headingText: heading }, val.docId);
-    return { success: true, data: { navigatedTo: heading }, activitySummary: `Navigated to "${heading}"` };
+    const res = await editorRegistry.executeAction('navigate_to_document_heading', { headingText: heading, searchText }, val.docId);
+    return { success: true, data: { navigatedTo: heading || searchText }, activitySummary: `Navigated to "${heading || searchText}"` };
   },
 };
 
@@ -2626,7 +2940,7 @@ export const selectContentTool: ToolCatalogEntry = {
   id: 'select_content',
   name: 'select_content',
   label: 'Select Content',
-  description: 'Select text in editor by query string or position range.',
+  description: 'Select text in editor by query string, startText..endText anchors, or position range.',
   category: 'document_inspection',
   workspace: ['doc'],
   risk: 'read_only',
@@ -2635,6 +2949,8 @@ export const selectContentTool: ToolCatalogEntry = {
     type: 'object',
     properties: {
       targetText: { type: 'string', description: 'Text phrase to select.' },
+      startText: { type: 'string', description: 'Optional start anchor phrase for multi-line selection.' },
+      endText: { type: 'string', description: 'Optional end anchor phrase for multi-line selection.' },
       from: { type: 'number', description: 'Start offset.' },
       to: { type: 'number', description: 'End offset.' },
     },
@@ -2643,8 +2959,9 @@ export const selectContentTool: ToolCatalogEntry = {
     const val = validateActiveDoc(context);
     if (!val.ok) return { success: false, error: val.error };
 
-    const res = await editorRegistry.executeAction('select_content', { targetText: args.targetText, from: args.from, to: args.to }, val.docId);
-    return { success: true, data: { selected: args.targetText || `${args.from}-${args.to}` }, activitySummary: `Selected content in editor` };
+    const res = await editorRegistry.executeAction('select_content', { targetText: args.targetText, startText: args.startText, endText: args.endText, from: args.from, to: args.to }, val.docId);
+    if (!res.success) return { success: false, error: res.error || 'Failed to select content.' };
+    return { success: true, data: { selected: args.targetText || args.startText || `${args.from}-${args.to}` }, activitySummary: `Selected content in editor` };
   },
 };
 
@@ -3052,7 +3369,7 @@ export const getPageSettingsTool: ToolCatalogEntry = {
   id: 'get_page_settings',
   name: 'get_page_settings',
   label: 'Get Page Settings',
-  description: 'Retrieve paper size, orientation, margins, columns, and headers/footers.',
+  description: 'Retrieve paper size, orientation, margins, columns, borders, page color, watermark, and first-page/running headers & footers.',
   category: 'page_layout',
   workspace: ['doc'],
   risk: 'read_only',
@@ -3071,8 +3388,21 @@ export const getPageSettingsTool: ToolCatalogEntry = {
         columns: doc.columns || 1,
         headerText: doc.headerText || '',
         footerText: doc.footerText || '',
+        headerAlign: doc.headerAlign || 'left',
+        footerAlign: doc.footerAlign || 'left',
+        firstPageHeaderText: doc.firstPageHeaderText || '',
+        firstPageFooterText: doc.firstPageFooterText || '',
+        showHeaderLine: Boolean(doc.showHeaderLine),
+        showFooterLine: Boolean(doc.showFooterLine),
         showPageNumbers: Boolean(doc.showPageNumbers),
+        pageNumberPosition: doc.pageNumberPosition || 'bottom-center',
         differentFirstPage: Boolean(doc.differentFirstPage),
+        watermarkText: doc.watermarkText || '',
+        pageColor: doc.pageColor || '#FFFFFF',
+        pageBorder: doc.pageBorder || 'none',
+        pageBorderColor: doc.pageBorderColor || '#1e293b',
+        pageBorderWidth: doc.pageBorderWidth || 1,
+        pageBorderOffset: doc.pageBorderOffset || 'edge',
       },
       activitySummary: `Inspected page setup (${doc.pageSize || 'A4'}, ${doc.orientation || 'portrait'})`,
     };
@@ -3083,7 +3413,7 @@ export const setPageSizeTool: ToolCatalogEntry = {
   id: 'set_page_size',
   name: 'set_page_size',
   label: 'Set Page Size',
-  description: 'Set page size (A4, Letter, Legal, Executive, A3, A5).',
+  description: 'Set page size (A4, Letter, Legal, A3, A5, Tabloid).',
   category: 'page_layout',
   workspace: ['doc'],
   risk: 'modifying',
@@ -3091,7 +3421,7 @@ export const setPageSizeTool: ToolCatalogEntry = {
   parameters: {
     type: 'object',
     properties: {
-      pageSize: { type: 'string', enum: ['A4', 'Letter', 'Legal', 'Executive', 'A3', 'A5'], description: 'Paper page size.' },
+      pageSize: { type: 'string', enum: ['A4', 'Letter', 'Legal', 'A3', 'A5', 'Tabloid'], description: 'Paper page size.' },
     },
     required: ['pageSize'],
   },
@@ -3100,7 +3430,7 @@ export const setPageSizeTool: ToolCatalogEntry = {
     if (!val.ok) return { success: false, error: val.error };
     const pageSize = args.pageSize as DocumentPageSize;
 
-    const res = await editorRegistry.executeAction('modify_page_layout', { pageSize }, val.docId);
+    await editorRegistry.executeAction('modify_page_layout', { pageSize }, val.docId);
     return { success: true, data: { pageSize }, activitySummary: `Set page size to ${pageSize}` };
   },
 };
@@ -3126,7 +3456,7 @@ export const setPageOrientationTool: ToolCatalogEntry = {
     if (!val.ok) return { success: false, error: val.error };
     const orientation = args.orientation as DocumentOrientation;
 
-    const res = await editorRegistry.executeAction('modify_page_layout', { orientation }, val.docId);
+    await editorRegistry.executeAction('modify_page_layout', { orientation }, val.docId);
     return { success: true, data: { orientation }, activitySummary: `Set page orientation to ${orientation}` };
   },
 };
@@ -3135,7 +3465,7 @@ export const setPageMarginsTool: ToolCatalogEntry = {
   id: 'set_page_margins',
   name: 'set_page_margins',
   label: 'Set Page Margins',
-  description: 'Set page margins preset (normal, narrow, wide) or custom measurements.',
+  description: 'Set page margins preset (normal, narrow, moderate, wide) or custom measurements in mm.',
   category: 'page_layout',
   workspace: ['doc'],
   risk: 'modifying',
@@ -3143,52 +3473,186 @@ export const setPageMarginsTool: ToolCatalogEntry = {
   parameters: {
     type: 'object',
     properties: {
-      preset: { type: 'string', enum: ['normal', 'narrow', 'wide'], description: 'Margin preset.' },
+      preset: { type: 'string', enum: ['normal', 'narrow', 'moderate', 'wide', 'custom'], description: 'Margin preset.' },
+      topMm: { type: 'number', description: 'Optional custom top margin in millimeters.' },
+      bottomMm: { type: 'number', description: 'Optional custom bottom margin in millimeters.' },
+      leftMm: { type: 'number', description: 'Optional custom left margin in millimeters.' },
+      rightMm: { type: 'number', description: 'Optional custom right margin in millimeters.' },
     },
-    required: ['preset'],
   },
   execute: async (args, context) => {
     const val = validateActiveDoc(context);
     if (!val.ok) return { success: false, error: val.error };
-    const preset = args.preset as 'normal' | 'narrow' | 'wide';
-
-    const res = await editorRegistry.executeAction('modify_page_layout', { marginPreset: preset, margins: preset }, val.docId);
+    const hasCustom =
+      args.topMm !== undefined || args.bottomMm !== undefined || args.leftMm !== undefined || args.rightMm !== undefined;
+    if (hasCustom) {
+      const customMargins = {
+        top: Number(args.topMm ?? 25.4),
+        bottom: Number(args.bottomMm ?? 25.4),
+        left: Number(args.leftMm ?? 25.4),
+        right: Number(args.rightMm ?? 25.4),
+      };
+      await editorRegistry.executeAction('modify_page_layout', { marginPreset: 'custom', margins: customMargins }, val.docId);
+      return { success: true, data: { marginPreset: 'custom', margins: customMargins }, activitySummary: 'Set custom page margins' };
+    }
+    const preset = (args.preset as 'normal' | 'narrow' | 'moderate' | 'wide') || 'normal';
+    await editorRegistry.executeAction('modify_page_layout', { marginPreset: preset, margins: preset }, val.docId);
     return { success: true, data: { marginPreset: preset }, activitySummary: `Set margins to ${preset}` };
+  },
+};
+
+export const setPageColumnsTool: ToolCatalogEntry = {
+  id: 'set_page_columns',
+  name: 'set_page_columns',
+  label: 'Set Page Columns',
+  description: 'Set document column layout (1, 2, or 3 columns).',
+  category: 'page_layout',
+  workspace: ['doc'],
+  risk: 'modifying',
+  availability: 'implemented',
+  aliases: ['columns', 'two columns', 'three columns', 'single column'],
+  keywords: ['columns', 'column layout', 'multi-column', 'newspaper'],
+  parameters: {
+    type: 'object',
+    properties: {
+      columns: { type: 'number', enum: [1, 2, 3], description: 'Number of text columns (1, 2, or 3).' },
+    },
+    required: ['columns'],
+  },
+  execute: async (args, context) => {
+    const val = validateActiveDoc(context);
+    if (!val.ok) return { success: false, error: val.error };
+    const columns = Math.max(1, Math.min(3, Number(args.columns || 1))) as 1 | 2 | 3;
+    await editorRegistry.executeAction('modify_page_layout', { columns }, val.docId);
+    return { success: true, data: { columns }, activitySummary: `Set layout to ${columns} column${columns > 1 ? 's' : ''}` };
+  },
+};
+
+export const setPageColorTool: ToolCatalogEntry = {
+  id: 'set_page_color',
+  name: 'set_page_color',
+  label: 'Set Page Background Color',
+  description: 'Set the physical paper background color across all pages (hex string, e.g. "#FFFFFF", "#FAF5E8", "#F4F8FD").',
+  category: 'page_layout',
+  workspace: ['doc'],
+  risk: 'modifying',
+  availability: 'implemented',
+  aliases: ['page background color', 'paper color', 'background color'],
+  keywords: ['page color', 'background', 'paper', 'theme color'],
+  parameters: {
+    type: 'object',
+    properties: {
+      color: { type: 'string', description: 'Hex background color (e.g. "#FFFFFF", "#FDFCF7", "#F4F8F5").' },
+    },
+    required: ['color'],
+  },
+  execute: async (args, context) => {
+    const val = validateActiveDoc(context);
+    if (!val.ok) return { success: false, error: val.error };
+    const color = String(args.color || '#FFFFFF').trim();
+    await editorRegistry.executeAction('modify_page_layout', { pageColor: color }, val.docId);
+    return { success: true, data: { pageColor: color }, activitySummary: `Set page color to ${color}` };
+  },
+};
+
+export const setPageBordersTool: ToolCatalogEntry = {
+  id: 'set_page_borders',
+  name: 'set_page_borders',
+  label: 'Set Page Borders',
+  description: 'Add, customize, or remove page borders on all pages (box, shadow, double, accent, or none) with optional color, width, and offset.',
+  category: 'page_layout',
+  workspace: ['doc'],
+  risk: 'modifying',
+  availability: 'implemented',
+  aliases: ['add page borders', 'page border', 'frame pages', 'remove page borders'],
+  keywords: ['border', 'borders', 'page border', 'frame', 'box', 'double', 'accent', 'shadow'],
+  parameters: {
+    type: 'object',
+    properties: {
+      borderStyle: { type: 'string', enum: ['none', 'box', 'shadow', 'double', 'accent'], description: 'Page border frame style.' },
+      borderColor: { type: 'string', description: 'Optional border hex color (e.g. "#1e293b", "#245c45").' },
+      borderWidth: { type: 'number', description: 'Optional border stroke width in px (1 to 6).' },
+      borderOffset: { type: 'string', enum: ['edge', 'margin', 'wide'], description: 'Border inset position relative to page edge or margin.' },
+    },
+    required: ['borderStyle'],
+  },
+  execute: async (args, context) => {
+    const val = validateActiveDoc(context);
+    if (!val.ok) return { success: false, error: val.error };
+    const borderStyle = (args.borderStyle as 'none' | 'box' | 'shadow' | 'double' | 'accent') || 'box';
+    const layoutPayload: Record<string, unknown> = { pageBorder: borderStyle };
+    if (args.borderColor) layoutPayload.pageBorderColor = String(args.borderColor);
+    if (args.borderWidth !== undefined) layoutPayload.pageBorderWidth = Math.max(1, Math.min(6, Number(args.borderWidth)));
+    if (args.borderOffset) layoutPayload.pageBorderOffset = String(args.borderOffset);
+
+    await editorRegistry.executeAction('modify_page_layout', layoutPayload, val.docId);
+    return {
+      success: true,
+      data: layoutPayload,
+      activitySummary: borderStyle === 'none' ? 'Removed page borders' : `Applied "${borderStyle}" page borders`,
+    };
   },
 };
 
 export const updateHeaderTool: ToolCatalogEntry = {
   id: 'update_header',
   name: 'update_header',
-  label: 'Update Running Header',
-  description: 'Set or update the document running header text.',
+  label: 'Update Header / Different First Page Header',
+  description:
+    'Set running headers across pages, and optionally configure a SEPARATE first-page header/title ("firstPageHeaderText") with "differentFirstPage: true" so page 1 shows a distinct title/header while pages 2+ show "headerText" (or remain empty if headerText="").',
   category: 'page_layout',
   workspace: ['doc'],
   risk: 'modifying',
   availability: 'implemented',
+  aliases: ['set header', 'first page header', 'different first page header', 'page title header'],
+  keywords: ['header', 'first page', 'different first page', 'running header', 'title', 'remaining pages'],
   parameters: {
     type: 'object',
     properties: {
-      headerText: { type: 'string', description: 'Header text to display at top of pages.' },
-      differentFirstPage: { type: 'boolean', description: 'Different header on first page.' },
+      headerText: { type: 'string', description: 'Header text for all pages (or for pages 2+ when differentFirstPage is true; pass "" to leave pages 2+ empty).' },
+      firstPageHeaderText: { type: 'string', description: 'Optional separate header text shown ONLY on page 1 when differentFirstPage is enabled.' },
+      differentFirstPage: { type: 'boolean', description: 'Set true to enable separate header/footer for page 1 vs subsequent pages.' },
+      headerAlign: { type: 'string', enum: ['left', 'center', 'right'], description: 'Horizontal alignment of header text.' },
+      showHeaderLine: { type: 'boolean', description: 'Show or hide the horizontal divider line below the header (default false).' },
     },
-    required: ['headerText'],
   },
   execute: async (args, context) => {
     const val = validateActiveDoc(context);
     if (!val.ok) return { success: false, error: val.error };
-    const headerText = String(args.headerText || '');
 
-    const res = await editorRegistry.executeAction('modify_page_layout', { headerText, differentFirstPage: args.differentFirstPage }, val.docId);
-    return { success: true, data: { headerText }, activitySummary: `Updated header: "${headerText}"` };
+    const layoutPayload: Record<string, unknown> = {};
+    if (args.headerText !== undefined) layoutPayload.headerText = String(args.headerText);
+    if (args.firstPageHeaderText !== undefined) {
+      layoutPayload.firstPageHeaderText = String(args.firstPageHeaderText);
+      if (args.differentFirstPage === undefined) {
+        layoutPayload.differentFirstPage = true;
+      }
+    }
+    if (args.differentFirstPage !== undefined) layoutPayload.differentFirstPage = Boolean(args.differentFirstPage);
+    if (args.headerAlign !== undefined) layoutPayload.headerAlign = String(args.headerAlign);
+    if (args.showHeaderLine !== undefined) layoutPayload.showHeaderLine = Boolean(args.showHeaderLine);
+
+    if (Object.keys(layoutPayload).length === 0) {
+      return { success: false, error: 'Provide headerText, firstPageHeaderText, differentFirstPage, showHeaderLine, or headerAlign.' };
+    }
+
+    await editorRegistry.executeAction('modify_page_layout', layoutPayload, val.docId);
+    const descParts: string[] = [];
+    if (layoutPayload.firstPageHeaderText !== undefined) descParts.push(`first page "${layoutPayload.firstPageHeaderText}"`);
+    if (layoutPayload.headerText !== undefined) descParts.push(`remaining/running "${layoutPayload.headerText}"`);
+    return {
+      success: true,
+      data: layoutPayload,
+      activitySummary: `Updated header (${descParts.join(', ') || 'layout updated'})`,
+    };
   },
 };
 
 export const updateFooterTool: ToolCatalogEntry = {
   id: 'update_footer',
   name: 'update_footer',
-  label: 'Update Running Footer',
-  description: 'Set or update the document running footer text.',
+  label: 'Update Footer / Different First Page Footer',
+  description: 'Set or update running footer text across pages, with optional separate first-page footer and alignment.',
   category: 'page_layout',
   workspace: ['doc'],
   risk: 'modifying',
@@ -3196,18 +3660,31 @@ export const updateFooterTool: ToolCatalogEntry = {
   parameters: {
     type: 'object',
     properties: {
-      footerText: { type: 'string', description: 'Footer text to display at bottom of pages.' },
-      differentFirstPage: { type: 'boolean', description: 'Different footer on first page.' },
+      footerText: { type: 'string', description: 'Footer text for pages (or pages 2+ when differentFirstPage is true).' },
+      firstPageFooterText: { type: 'string', description: 'Optional separate footer text shown only on page 1.' },
+      differentFirstPage: { type: 'boolean', description: 'Different header/footer on first page.' },
+      footerAlign: { type: 'string', enum: ['left', 'center', 'right'], description: 'Horizontal alignment of footer text.' },
+      showFooterLine: { type: 'boolean', description: 'Show or hide the horizontal divider line above the footer (default false).' },
     },
-    required: ['footerText'],
   },
   execute: async (args, context) => {
     const val = validateActiveDoc(context);
     if (!val.ok) return { success: false, error: val.error };
-    const footerText = String(args.footerText || '');
 
-    const res = await editorRegistry.executeAction('modify_page_layout', { footerText, differentFirstPage: args.differentFirstPage }, val.docId);
-    return { success: true, data: { footerText }, activitySummary: `Updated footer: "${footerText}"` };
+    const layoutPayload: Record<string, unknown> = {};
+    if (args.footerText !== undefined) layoutPayload.footerText = String(args.footerText);
+    if (args.firstPageFooterText !== undefined) {
+      layoutPayload.firstPageFooterText = String(args.firstPageFooterText);
+      if (args.differentFirstPage === undefined) {
+        layoutPayload.differentFirstPage = true;
+      }
+    }
+    if (args.differentFirstPage !== undefined) layoutPayload.differentFirstPage = Boolean(args.differentFirstPage);
+    if (args.footerAlign !== undefined) layoutPayload.footerAlign = String(args.footerAlign);
+    if (args.showFooterLine !== undefined) layoutPayload.showFooterLine = Boolean(args.showFooterLine);
+
+    await editorRegistry.executeAction('modify_page_layout', layoutPayload, val.docId);
+    return { success: true, data: layoutPayload, activitySummary: 'Updated document footer' };
   },
 };
 
@@ -3215,18 +3692,30 @@ export const deleteHeaderTool: ToolCatalogEntry = {
   id: 'delete_header',
   name: 'delete_header',
   label: 'Delete Header',
-  description: 'Remove running header from document.',
+  description: 'Remove running header across all pages, only from the first page, or only from remaining pages.',
   category: 'page_layout',
   workspace: ['doc'],
   risk: 'modifying',
   availability: 'implemented',
-  parameters: { type: 'object', properties: {} },
-  execute: async (_args, context) => {
+  parameters: {
+    type: 'object',
+    properties: {
+      scope: { type: 'string', enum: ['all', 'first_page', 'remaining_pages'], description: 'Which pages header to clear (default all).' },
+    },
+  },
+  execute: async (args, context) => {
     const val = validateActiveDoc(context);
     if (!val.ok) return { success: false, error: val.error };
+    const scope = String(args.scope || 'all');
+    const payload =
+      scope === 'first_page'
+        ? { firstPageHeaderText: '', differentFirstPage: true }
+        : scope === 'remaining_pages'
+        ? { headerText: '', differentFirstPage: true }
+        : { headerText: '', firstPageHeaderText: '' };
 
-    const res = await editorRegistry.executeAction('modify_page_layout', { headerText: '' }, val.docId);
-    return { success: true, data: { cleared: true }, activitySummary: 'Cleared running header' };
+    await editorRegistry.executeAction('modify_page_layout', payload, val.docId);
+    return { success: true, data: { cleared: scope }, activitySummary: `Cleared header (${scope})` };
   },
 };
 
@@ -3234,18 +3723,30 @@ export const deleteFooterTool: ToolCatalogEntry = {
   id: 'delete_footer',
   name: 'delete_footer',
   label: 'Delete Footer',
-  description: 'Remove running footer from document.',
+  description: 'Remove running footer across all pages, only from the first page, or only from remaining pages.',
   category: 'page_layout',
   workspace: ['doc'],
   risk: 'modifying',
   availability: 'implemented',
-  parameters: { type: 'object', properties: {} },
-  execute: async (_args, context) => {
+  parameters: {
+    type: 'object',
+    properties: {
+      scope: { type: 'string', enum: ['all', 'first_page', 'remaining_pages'], description: 'Which pages footer to clear (default all).' },
+    },
+  },
+  execute: async (args, context) => {
     const val = validateActiveDoc(context);
     if (!val.ok) return { success: false, error: val.error };
+    const scope = String(args.scope || 'all');
+    const payload =
+      scope === 'first_page'
+        ? { firstPageFooterText: '', differentFirstPage: true }
+        : scope === 'remaining_pages'
+        ? { footerText: '', differentFirstPage: true }
+        : { footerText: '', firstPageFooterText: '' };
 
-    const res = await editorRegistry.executeAction('modify_page_layout', { footerText: '' }, val.docId);
-    return { success: true, data: { cleared: true }, activitySummary: 'Cleared running footer' };
+    await editorRegistry.executeAction('modify_page_layout', payload, val.docId);
+    return { success: true, data: { cleared: scope }, activitySummary: `Cleared footer (${scope})` };
   },
 };
 
@@ -3801,15 +4302,17 @@ export const exportAsPdfTool: ToolCatalogEntry = {
   id: 'export_as_pdf',
   name: 'export_as_pdf',
   label: 'Export Document as PDF',
-  description: 'Export the active document as a print-ready PDF file preserving layout, margins, and headers/footers.',
+  description: 'Trigger a direct browser PDF file download preserving selectable vector text, layout, margins, borders, and first-page/running headers & footers.',
   category: 'export_import',
   workspace: ['doc'],
-  risk: 'read_only',
+  risk: 'modifying',
   availability: 'implemented',
+  aliases: ['download pdf', 'save as pdf', 'export pdf'],
+  keywords: ['export', 'download', 'pdf', 'save pdf'],
   parameters: {
     type: 'object',
     properties: {
-      title: { type: 'string', description: 'Optional export document title.' },
+      title: { type: 'string', description: 'Optional export filename/title.' },
     },
   },
   execute: async (args, context) => {
@@ -3818,13 +4321,39 @@ export const exportAsPdfTool: ToolCatalogEntry = {
     const doc = context.activeDocument;
     const title = String(args.title || doc?.title || 'Document');
 
+    const res = await dispatchOrExecuteEditorAction(
+      context,
+      'export_document',
+      { format: 'pdf', title },
+      val.docId,
+      `Triggered PDF download for "${title}"`
+    );
+    if (!res.success) return { success: false, error: res.error || 'Failed to trigger PDF export.' };
     if (typeof window !== 'undefined') {
       try {
-        triggerPrintPdf({
-          title,
+        await exportToPdf(title, {
+          htmlContent: doc?.content,
           pageSize: doc?.pageSize,
           orientation: doc?.orientation,
           margins: doc?.margins,
+          columns: doc?.columns,
+          headerText: doc?.headerText,
+          footerText: doc?.footerText,
+          headerAlign: doc?.headerAlign,
+          footerAlign: doc?.footerAlign,
+          firstPageHeaderText: doc?.firstPageHeaderText,
+          firstPageFooterText: doc?.firstPageFooterText,
+          showHeaderLine: doc?.showHeaderLine,
+          showFooterLine: doc?.showFooterLine,
+          showPageNumbers: doc?.showPageNumbers,
+          pageNumberPosition: doc?.pageNumberPosition,
+          differentFirstPage: doc?.differentFirstPage,
+          watermarkText: doc?.watermarkText,
+          pageColor: doc?.pageColor,
+          pageBorder: doc?.pageBorder,
+          pageBorderColor: doc?.pageBorderColor,
+          pageBorderWidth: doc?.pageBorderWidth,
+          pageBorderOffset: doc?.pageBorderOffset,
         });
       } catch (err) {
         console.warn('PDF export trigger error:', err);
@@ -3838,9 +4367,10 @@ export const exportAsPdfTool: ToolCatalogEntry = {
         title,
         pageSize: doc?.pageSize || 'A4',
         orientation: doc?.orientation || 'portrait',
-        status: 'Export generated successfully',
+        status: 'Browser PDF download triggered',
       },
-      activitySummary: `Exported "${title}" as PDF`,
+      activitySummary: `Triggered PDF download for "${title}"`,
+      editorAction: res.editorAction,
     };
   },
 };
@@ -3849,15 +4379,17 @@ export const exportAsDocxTool: ToolCatalogEntry = {
   id: 'export_as_docx',
   name: 'export_as_docx',
   label: 'Export Document as Word (DOCX)',
-  description: 'Generate Microsoft Word compatible DOCX format preserving styles, tables, and headings.',
+  description: 'Trigger a direct browser Word (.docx) download preserving styles, tables, headings, and page layout.',
   category: 'export_import',
   workspace: ['doc'],
-  risk: 'read_only',
+  risk: 'modifying',
   availability: 'implemented',
+  aliases: ['download docx', 'download word', 'export word', 'save as word'],
+  keywords: ['export', 'download', 'docx', 'word'],
   parameters: {
     type: 'object',
     properties: {
-      title: { type: 'string', description: 'Optional export title.' },
+      title: { type: 'string', description: 'Optional export filename/title.' },
     },
   },
   execute: async (args, context) => {
@@ -3867,9 +4399,39 @@ export const exportAsDocxTool: ToolCatalogEntry = {
     const title = String(args.title || doc?.title || 'Document');
     const content = doc?.content || '';
 
+    const res = await dispatchOrExecuteEditorAction(
+      context,
+      'export_document',
+      { format: 'docx', title },
+      val.docId,
+      `Triggered DOCX download for "${title}"`
+    );
+    if (!res.success) return { success: false, error: res.error || 'Failed to trigger DOCX export.' };
     if (typeof window !== 'undefined') {
       try {
-        exportToDocx(title, content);
+        await exportToDocx(title, content, {
+          pageSize: doc?.pageSize,
+          orientation: doc?.orientation,
+          margins: doc?.margins,
+          columns: doc?.columns,
+          headerText: doc?.headerText,
+          footerText: doc?.footerText,
+          headerAlign: doc?.headerAlign,
+          footerAlign: doc?.footerAlign,
+          firstPageHeaderText: doc?.firstPageHeaderText,
+          firstPageFooterText: doc?.firstPageFooterText,
+          showHeaderLine: Boolean(doc?.showHeaderLine),
+          showFooterLine: Boolean(doc?.showFooterLine),
+          showPageNumbers: Boolean(doc?.showPageNumbers),
+          pageNumberPosition: doc?.pageNumberPosition,
+          differentFirstPage: Boolean(doc?.differentFirstPage),
+          watermarkText: doc?.watermarkText,
+          pageColor: doc?.pageColor,
+          pageBorder: doc?.pageBorder,
+          pageBorderColor: doc?.pageBorderColor,
+          pageBorderWidth: doc?.pageBorderWidth,
+          pageBorderOffset: doc?.pageBorderOffset,
+        });
       } catch (err) {
         console.warn('DOCX export trigger error:', err);
       }
@@ -3881,9 +4443,10 @@ export const exportAsDocxTool: ToolCatalogEntry = {
         format: 'docx',
         title,
         contentLength: content.length,
-        status: 'Word document export generated successfully',
+        status: 'Browser DOCX download triggered',
       },
-      activitySummary: `Exported "${title}" as DOCX`,
+      activitySummary: `Triggered DOCX download for "${title}"`,
+      editorAction: res.editorAction,
     };
   },
 };
@@ -3892,15 +4455,17 @@ export const exportAsTxtTool: ToolCatalogEntry = {
   id: 'export_as_txt',
   name: 'export_as_txt',
   label: 'Export Document as Plain Text',
-  description: 'Export document as clean UTF-8 plain text without HTML tags.',
+  description: 'Trigger a direct browser plain text (.txt) file download.',
   category: 'export_import',
   workspace: ['doc'],
-  risk: 'read_only',
+  risk: 'modifying',
   availability: 'implemented',
+  aliases: ['download txt', 'save as txt', 'export text'],
+  keywords: ['export', 'download', 'txt', 'plain text'],
   parameters: {
     type: 'object',
     properties: {
-      title: { type: 'string', description: 'Optional export title.' },
+      title: { type: 'string', description: 'Optional export filename/title.' },
     },
   },
   execute: async (args, context) => {
@@ -3910,6 +4475,14 @@ export const exportAsTxtTool: ToolCatalogEntry = {
     const title = String(args.title || doc?.title || 'Document');
     const content = doc?.content || '';
 
+    const res = await dispatchOrExecuteEditorAction(
+      context,
+      'export_document',
+      { format: 'txt', title },
+      val.docId,
+      `Triggered TXT download for "${title}"`
+    );
+    if (!res.success) return { success: false, error: res.error || 'Failed to trigger TXT export.' };
     if (typeof window !== 'undefined') {
       try {
         exportToPlainText(title, content);
@@ -3924,9 +4497,11 @@ export const exportAsTxtTool: ToolCatalogEntry = {
       data: {
         format: 'txt',
         title,
-        wordCount: plain.split(/\s+/).length,
+        wordCount: plain ? plain.split(/\s+/).length : 0,
+        status: 'Browser TXT download triggered',
       },
-      activitySummary: `Exported "${title}" as TXT`,
+      activitySummary: `Triggered TXT download for "${title}"`,
+      editorAction: res.editorAction,
     };
   },
 };
@@ -3935,15 +4510,17 @@ export const exportAsHtmlTool: ToolCatalogEntry = {
   id: 'export_as_html',
   name: 'export_as_html',
   label: 'Export Document as HTML',
-  description: 'Export document as structured standalone HTML with typography and layout styling.',
+  description: 'Trigger a direct browser standalone HTML file download.',
   category: 'export_import',
   workspace: ['doc'],
-  risk: 'read_only',
+  risk: 'modifying',
   availability: 'implemented',
+  aliases: ['download html', 'save as html', 'export html'],
+  keywords: ['export', 'download', 'html', 'web page'],
   parameters: {
     type: 'object',
     properties: {
-      title: { type: 'string', description: 'Optional export title.' },
+      title: { type: 'string', description: 'Optional export filename/title.' },
     },
   },
   execute: async (args, context) => {
@@ -3953,6 +4530,14 @@ export const exportAsHtmlTool: ToolCatalogEntry = {
     const title = String(args.title || doc?.title || 'Document');
     const content = doc?.content || '';
 
+    const res = await dispatchOrExecuteEditorAction(
+      context,
+      'export_document',
+      { format: 'html', title },
+      val.docId,
+      `Triggered HTML download for "${title}"`
+    );
+    if (!res.success) return { success: false, error: res.error || 'Failed to trigger HTML export.' };
     if (typeof window !== 'undefined') {
       try {
         exportToHtml(title, content);
@@ -3967,9 +4552,172 @@ export const exportAsHtmlTool: ToolCatalogEntry = {
         format: 'html',
         title,
         byteLength: content.length,
+        status: 'Browser HTML download triggered',
       },
-      activitySummary: `Exported "${title}" as HTML`,
+      activitySummary: `Triggered HTML download for "${title}"`,
+      editorAction: res.editorAction,
     };
+  },
+};
+
+export const exportAsMarkdownTool: ToolCatalogEntry = {
+  id: 'export_as_markdown',
+  name: 'export_as_markdown',
+  label: 'Export Document as Markdown',
+  description: 'Trigger a direct browser Markdown (.md) file download.',
+  category: 'export_import',
+  workspace: ['doc'],
+  risk: 'modifying',
+  availability: 'implemented',
+  aliases: ['download markdown', 'save as markdown', 'export md'],
+  keywords: ['export', 'download', 'markdown', 'md'],
+  parameters: {
+    type: 'object',
+    properties: {
+      title: { type: 'string', description: 'Optional export filename/title.' },
+    },
+  },
+  execute: async (args, context) => {
+    const val = validateActiveDoc(context);
+    if (!val.ok) return { success: false, error: val.error };
+    const doc = context.activeDocument;
+    const title = String(args.title || doc?.title || 'Document');
+    const content = doc?.content || '';
+
+    const res = await dispatchOrExecuteEditorAction(
+      context,
+      'export_document',
+      { format: 'markdown', title },
+      val.docId,
+      `Triggered Markdown download for "${title}"`
+    );
+    if (!res.success) return { success: false, error: res.error || 'Failed to trigger Markdown export.' };
+    if (typeof window !== 'undefined') {
+      try {
+        exportToMarkdown(title, content);
+      } catch (err) {
+        console.warn('Markdown export trigger error:', err);
+      }
+    }
+    return {
+      success: true,
+      data: { format: 'markdown', title, status: 'Browser Markdown download triggered' },
+      activitySummary: `Triggered Markdown download for "${title}"`,
+      editorAction: res.editorAction,
+    };
+  },
+};
+
+export const printDocumentTool: ToolCatalogEntry = {
+  id: 'print_document',
+  name: 'print_document',
+  label: 'Print Document',
+  description: 'Open the browser print dialog formatted cleanly for all document pages.',
+  category: 'export_import',
+  workspace: ['doc'],
+  risk: 'modifying',
+  availability: 'implemented',
+  aliases: ['print page', 'print document'],
+  keywords: ['print', 'printer'],
+  parameters: {
+    type: 'object',
+    properties: {
+      title: { type: 'string', description: 'Optional print title.' },
+    },
+  },
+  execute: async (args, context) => {
+    const val = validateActiveDoc(context);
+    if (!val.ok) return { success: false, error: val.error };
+    const doc = context.activeDocument;
+    const title = String(args.title || doc?.title || 'Document');
+    const res = await dispatchOrExecuteEditorAction(
+      context,
+      'export_document',
+      { format: 'print', title },
+      val.docId,
+      `Opened print view for "${title}"`
+    );
+    if (!res.success) return { success: false, error: res.error || 'Failed to open print dialog.' };
+    if (typeof window !== 'undefined') {
+      triggerPrintPdf({ title, pageSize: doc?.pageSize, orientation: doc?.orientation, margins: doc?.margins });
+    }
+    return {
+      success: true,
+      data: { format: 'print', title },
+      activitySummary: `Opened print dialog for "${title}"`,
+      editorAction: res.editorAction,
+    };
+  },
+};
+
+export const setDocumentViewTool: ToolCatalogEntry = {
+  id: 'set_document_view',
+  name: 'set_document_view',
+  label: 'Configure Document View',
+  description: 'Control View ribbon options: zoom percentage (50-250), viewMode (paginated or continuous), ruler, navigation outline, formatting marks, and focus mode.',
+  category: 'page_layout',
+  workspace: ['doc'],
+  risk: 'modifying',
+  availability: 'implemented',
+  aliases: ['zoom', 'focus mode', 'show ruler', 'show outline', 'formatting marks', 'continuous view', 'paginated view'],
+  keywords: ['zoom', 'ruler', 'outline', 'formatting marks', 'focus mode', 'view', 'paginated', 'continuous'],
+  parameters: {
+    type: 'object',
+    properties: {
+      zoomLevel: { type: 'number', description: 'Zoom percentage from 50 to 250.' },
+      viewMode: { type: 'string', enum: ['paginated', 'continuous'], description: 'Paginated paper sheets vs continuous view.' },
+      showRuler: { type: 'boolean', description: 'Show/hide horizontal and vertical rulers.' },
+      showOutline: { type: 'boolean', description: 'Show/hide document navigation outline panel.' },
+      showFormattingMarks: { type: 'boolean', description: 'Show/hide non-printing paragraph marks (¶).' },
+      focusMode: { type: 'boolean', description: 'Enable/disable distraction-free Focus Mode.' },
+    },
+  },
+  execute: async (args, context) => {
+    const val = validateActiveDoc(context);
+    if (!val.ok) return { success: false, error: val.error };
+    const payload: Record<string, unknown> = {};
+    if (args.zoomLevel !== undefined) payload.zoomLevel = Number(args.zoomLevel);
+    if (args.viewMode !== undefined) payload.viewMode = String(args.viewMode);
+    if (args.showRuler !== undefined) payload.showRuler = Boolean(args.showRuler);
+    if (args.showOutline !== undefined) payload.showOutline = Boolean(args.showOutline);
+    if (args.showFormattingMarks !== undefined) payload.showFormattingMarks = Boolean(args.showFormattingMarks);
+    if (args.focusMode !== undefined) payload.focusMode = Boolean(args.focusMode);
+
+    const res = await dispatchOrExecuteEditorAction(context, 'set_document_view', payload, val.docId, 'Updated document view settings');
+    if (!res.success) return { success: false, error: res.error || 'Failed to update view settings.' };
+    return { success: true, data: payload, activitySummary: 'Updated document view settings', editorAction: res.editorAction };
+  },
+};
+
+export const setEditorPreferencesTool: ToolCatalogEntry = {
+  id: 'set_editor_preferences',
+  name: 'set_editor_preferences',
+  label: 'Set Review Preferences',
+  description: 'Toggle Review ribbon controls: suggesting mode, spellcheck, or comments sidebar visibility.',
+  category: 'review_quality',
+  workspace: ['doc'],
+  risk: 'modifying',
+  availability: 'implemented',
+  aliases: ['suggesting mode', 'spell check', 'comments sidebar'],
+  keywords: ['suggesting', 'spell check', 'comments panel', 'review mode'],
+  parameters: {
+    type: 'object',
+    properties: {
+      suggestingMode: { type: 'boolean', description: 'Enable/disable Suggesting Mode.' },
+      spellCheckEnabled: { type: 'boolean', description: 'Enable/disable browser spell check.' },
+      commentsSidebarOpen: { type: 'boolean', description: 'Show/hide the comments sidebar.' },
+    },
+  },
+  execute: async (args, context) => {
+    const val = validateActiveDoc(context);
+    if (!val.ok) return { success: false, error: val.error };
+    const payload: Record<string, unknown> = {};
+    if (args.suggestingMode !== undefined) payload.suggestingMode = Boolean(args.suggestingMode);
+    if (args.spellCheckEnabled !== undefined) payload.spellCheckEnabled = Boolean(args.spellCheckEnabled);
+    if (args.commentsSidebarOpen !== undefined) payload.commentsSidebarOpen = Boolean(args.commentsSidebarOpen);
+    const res = await dispatchOrExecuteEditorAction(context, 'set_editor_preferences', payload, val.docId, 'Updated editor review settings');
+    if (!res.success) return { success: false, error: res.error || 'Failed to update review preferences.' };
+    return { success: true, data: payload, activitySummary: 'Updated editor review settings', editorAction: res.editorAction };
   },
 };
 
@@ -4168,6 +4916,7 @@ export const insertShapeTool: ToolCatalogEntry = {
         enum: ['left', 'center', 'right', 'float-left', 'float-right'],
         description: 'Alignment or text wrapping.',
       },
+      ...UNIVERSAL_ANCHOR_PROPERTIES,
     },
     required: ['shapeType'],
   },
@@ -4185,6 +4934,7 @@ export const insertShapeTool: ToolCatalogEntry = {
         fill: args.fill,
         stroke: args.stroke,
         alignment: args.alignment || 'center',
+        ...pickAnchorPayload(args),
       },
       val.docId
     );
@@ -4202,7 +4952,7 @@ export const insertTextBoxTool: ToolCatalogEntry = {
   name: 'insert_text_box',
   label: 'Insert Text Box',
   description:
-    'Insert a styled, resizable Text Box (full-width banner, centered pull-quote box, or floating sidebar box with text wrapping).',
+    'Insert a styled, resizable Text Box (full-width banner, centered pull-quote box, or floating sidebar box with text wrapping) at an anchor or replacing target text.',
   category: 'content_creation',
   workspace: ['doc'],
   risk: 'modifying',
@@ -4221,6 +4971,7 @@ export const insertTextBoxTool: ToolCatalogEntry = {
         enum: ['full', 'left', 'center', 'right', 'float-left', 'float-right'],
         description: 'Position or text-wrapping float mode.',
       },
+      ...UNIVERSAL_ANCHOR_PROPERTIES,
     },
     required: ['text'],
   },
@@ -4237,6 +4988,7 @@ export const insertTextBoxTool: ToolCatalogEntry = {
         borderColor: args.borderColor || '#245C45',
         borderStyle: args.borderStyle || 'solid',
         alignment: args.alignment || 'full',
+        ...pickAnchorPayload(args),
       },
       val.docId
     );
@@ -4281,15 +5033,7 @@ export const insertChartDocTool: ToolCatalogEntry = {
         items: { type: 'number' },
         description: 'Numeric values corresponding to each label.',
       },
-      position: {
-        type: 'string',
-        enum: ['end', 'cursor', 'afterHeading'],
-        description: 'Where to insert the chart (defaults to "end").',
-      },
-      afterHeading: {
-        type: 'string',
-        description: 'Optional heading text to insert the chart directly after (when position is "afterHeading" or omitted).',
-      },
+      ...UNIVERSAL_ANCHOR_PROPERTIES,
     },
     required: ['title', 'labels', 'values'],
   },
@@ -4311,8 +5055,7 @@ export const insertChartDocTool: ToolCatalogEntry = {
         subtitle: args.subtitle,
         labels,
         values,
-        position: args.position,
-        afterHeading: args.afterHeading,
+        ...pickAnchorPayload(args),
       },
       val.docId
     );
@@ -4321,6 +5064,77 @@ export const insertChartDocTool: ToolCatalogEntry = {
       success: true,
       data: { chartType, title, pointCount: Math.min(labels.length, values.length) },
       activitySummary: `Inserted ${chartType} chart "${title}"`,
+    };
+  },
+};
+
+export const insertDiagramTool: ToolCatalogEntry = {
+  id: 'insert_diagram',
+  name: 'insert_diagram',
+  label: 'Insert Visual Diagram (Mermaid)',
+  description:
+    'Render a crisp flowchart, architecture diagram, timeline, sequence diagram, hierarchy, or mindmap using Mermaid syntax directly onto the page (supports in-place replacement of text/ASCII diagrams via replaceTargetText, replaceStartText+replaceEndText, or replaceBlockContaining).',
+  category: 'content_creation',
+  workspace: ['doc'],
+  risk: 'modifying',
+  availability: 'implemented',
+  aliases: [
+    'create flowchart',
+    'draw architecture diagram',
+    'convert text diagram to visual diagram',
+    'insert mermaid diagram',
+    'render diagram',
+  ],
+  keywords: ['diagram', 'mermaid', 'flowchart', 'architecture', 'sequence', 'timeline', 'hierarchy', 'ascii', 'visual'],
+  parameters: {
+    type: 'object',
+    properties: {
+      code: {
+        type: 'string',
+        description: 'Valid Mermaid diagram definition (e.g. "flowchart LR\\n  A[Rules] --> B[Stats] --> C[Representations]").',
+      },
+      title: { type: 'string', description: 'Short accessible diagram title.' },
+      caption: { type: 'string', description: 'Optional caption displayed below the diagram.' },
+      theme: {
+        type: 'string',
+        enum: ['neutral', 'forest', 'default', 'base', 'dark'],
+        description: 'Visual color theme (defaults to "neutral").',
+      },
+      width: { type: 'number', description: 'Target display width in pixels (default auto, max ~540).' },
+      alignment: {
+        type: 'string',
+        enum: ['left', 'center', 'right'],
+        description: 'Horizontal alignment (defaults to "center").',
+      },
+      ...UNIVERSAL_ANCHOR_PROPERTIES,
+    },
+    required: ['code'],
+  },
+  execute: async (args, context) => {
+    const val = validateActiveDoc(context);
+    if (!val.ok) return { success: false, error: val.error };
+    const code = String(args.code || '').trim();
+    if (!code) return { success: false, error: 'Mermaid diagram code is required.' };
+    const title = String(args.title || 'Diagram');
+
+    const res = await editorRegistry.executeAction(
+      'insert_diagram',
+      {
+        code,
+        title,
+        caption: args.caption,
+        theme: args.theme || 'neutral',
+        width: args.width,
+        alignment: args.alignment || 'center',
+        ...pickAnchorPayload(args),
+      },
+      val.docId
+    );
+    if (!res.success) return { success: false, error: res.error || 'Failed to insert diagram.' };
+    return {
+      success: true,
+      data: { title, diagramLength: code.length },
+      activitySummary: `Rendered diagram "${title}"`,
     };
   },
 };
@@ -4338,6 +5152,8 @@ export const insertEquationPlannedTool: ToolCatalogEntry = {
     type: 'object',
     properties: {
       latex: { type: 'string', description: 'Mathematical formula or LaTeX expression (e.g. "E = mc^2").' },
+      displayMode: { type: 'boolean', description: 'Whether to render as block display equation (default true).' },
+      ...UNIVERSAL_ANCHOR_PROPERTIES,
     },
     required: ['latex'],
   },
@@ -4346,7 +5162,11 @@ export const insertEquationPlannedTool: ToolCatalogEntry = {
     if (!val.ok) return { success: false, error: val.error };
     const latex = String(args.latex || '').trim();
     if (!latex) return { success: false, error: 'latex expression is required.' };
-    const res = await editorRegistry.executeAction('insert_equation', { latex }, val.docId);
+    const res = await editorRegistry.executeAction(
+      'insert_equation',
+      { latex, displayMode: args.displayMode, ...pickAnchorPayload(args) },
+      val.docId
+    );
     if (!res.success) return { success: false, error: res.error || 'Failed to insert equation.' };
     return { success: true, data: { latex }, activitySummary: `Inserted equation "${latex}"` };
   },
@@ -4356,26 +5176,125 @@ export const insertFootnotePlannedTool: ToolCatalogEntry = {
   id: 'insert_footnote',
   name: 'insert_footnote',
   label: 'Insert Footnote',
-  description: 'Insert a page footnote reference.',
+  description: 'Insert a footnote reference marker with note text at cursor or after specified text.',
   category: 'links_annotations',
   workspace: ['doc'],
   risk: 'modifying',
-  availability: 'planned',
-  parameters: { type: 'object', properties: {} },
-  execute: async () => ({ success: false, error: 'Footnote integration is planned for a future release.' }),
+  availability: 'implemented',
+  aliases: ['add footnote', 'footnote'],
+  keywords: ['footnote', 'note', 'reference'],
+  parameters: {
+    type: 'object',
+    properties: {
+      text: { type: 'string', description: 'Footnote note text.' },
+      afterText: { type: 'string', description: 'Optional anchor text after which to place the footnote.' },
+    },
+    required: ['text'],
+  },
+  execute: async (args, context) => {
+    const val = validateActiveDoc(context);
+    if (!val.ok) return { success: false, error: val.error };
+    const text = String(args.text || '').trim();
+    if (!text) return { success: false, error: 'Footnote text is required.' };
+    const safeTitle = text.replace(/"/g, '&quot;').replace(/</g, '&lt;');
+    const html = `<sup>[<span title="${safeTitle}">*</span>]</sup> `;
+    const res = await dispatchOrExecuteEditorAction(
+      context,
+      'insert_text_at_cursor',
+      { content: html, isHtml: true, afterText: args.afterText },
+      val.docId,
+      `Inserted footnote`
+    );
+    if (!res.success) return { success: false, error: res.error || 'Failed to insert footnote.' };
+    return { success: true, data: { footnote: text }, activitySummary: 'Inserted footnote', editorAction: res.editorAction };
+  },
 };
 
 export const insertEndnotePlannedTool: ToolCatalogEntry = {
   id: 'insert_endnote',
   name: 'insert_endnote',
   label: 'Insert Endnote',
-  description: 'Insert an endnote reference at document end.',
+  description: 'Insert an endnote marker in text and append the corresponding note entry at document end.',
   category: 'links_annotations',
   workspace: ['doc'],
   risk: 'modifying',
-  availability: 'planned',
-  parameters: { type: 'object', properties: {} },
-  execute: async () => ({ success: false, error: 'Endnote integration is planned for a future release.' }),
+  availability: 'implemented',
+  aliases: ['add endnote', 'endnote'],
+  keywords: ['endnote', 'reference', 'note'],
+  parameters: {
+    type: 'object',
+    properties: {
+      text: { type: 'string', description: 'Endnote text content.' },
+      marker: { type: 'string', description: 'Optional marker label (default "i").' },
+      afterText: { type: 'string', description: 'Optional anchor text for inline marker.' },
+    },
+    required: ['text'],
+  },
+  execute: async (args, context) => {
+    const val = validateActiveDoc(context);
+    if (!val.ok) return { success: false, error: val.error };
+    const text = String(args.text || '').trim();
+    const marker = String(args.marker || 'i').trim();
+    if (!text) return { success: false, error: 'Endnote text is required.' };
+    const safeText = text.replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    if (args.afterText) {
+      await dispatchOrExecuteEditorAction(
+        context,
+        'insert_text_at_cursor',
+        { content: `<sup>[${marker}]</sup> `, isHtml: true, afterText: args.afterText },
+        val.docId,
+        'Inserted endnote marker'
+      );
+    }
+    const res = await dispatchOrExecuteEditorAction(
+      context,
+      'append_or_insert_paragraph',
+      { text: `[${marker}] ${safeText}`, position: 'end' },
+      val.docId,
+      'Appended endnote at document end'
+    );
+    if (!res.success) return { success: false, error: res.error || 'Failed to insert endnote.' };
+    return { success: true, data: { endnote: text, marker }, activitySummary: 'Inserted endnote', editorAction: res.editorAction };
+  },
+};
+
+export const insertCaptionTool: ToolCatalogEntry = {
+  id: 'insert_caption',
+  name: 'insert_caption',
+  label: 'Insert Figure/Table Caption',
+  description: 'Insert a centered italic figure or table caption.',
+  category: 'links_annotations',
+  workspace: ['doc'],
+  risk: 'modifying',
+  availability: 'implemented',
+  aliases: ['add caption', 'figure caption', 'table caption'],
+  keywords: ['caption', 'figure', 'table'],
+  parameters: {
+    type: 'object',
+    properties: {
+      text: { type: 'string', description: 'Caption text (e.g. "Architecture Overview").' },
+      label: { type: 'string', description: 'Prefix label (e.g. "Figure 1", "Table 1", default "Figure").' },
+      afterHeading: { type: 'string', description: 'Optional heading placement.' },
+      afterText: { type: 'string', description: 'Optional anchor text placement.' },
+    },
+    required: ['text'],
+  },
+  execute: async (args, context) => {
+    const val = validateActiveDoc(context);
+    if (!val.ok) return { success: false, error: val.error };
+    const prefix = String(args.label || 'Figure').trim();
+    const text = String(args.text || '').trim();
+    const html = `<p style="text-align: center"><em>${prefix}: ${text.replace(/</g, '&lt;')}</em></p>`;
+    const res = await dispatchOrExecuteEditorAction(
+      context,
+      'insert_structured_document',
+      { content: html, isHtml: true, ...pickAnchorPayload(args) },
+      val.docId,
+      `Inserted caption: ${prefix}: ${text}`
+    );
+    if (!res.success) return { success: false, error: res.error || 'Failed to insert caption.' };
+    return { success: true, data: { caption: `${prefix}: ${text}` }, activitySummary: `Inserted caption`, editorAction: res.editorAction };
+  },
 };
 
 export const insertWatermarkPlannedTool: ToolCatalogEntry = {
@@ -4478,6 +5397,8 @@ const RAW_DOCUMENT_WORKSPACE_TOOLS: ToolCatalogEntry[] = [
   insertShapeTool,
   insertTextBoxTool,
   insertChartDocTool,
+  insertDiagramTool,
+  insertCoverPageTool,
   renameDocumentTool,
 
   // Transformations
@@ -4538,6 +5459,10 @@ const RAW_DOCUMENT_WORKSPACE_TOOLS: ToolCatalogEntry[] = [
   formatAllParagraphsTool,
   formatMatchingContentTool,
   removeFormattingTool,
+  setSubscriptTool,
+  setSuperscriptTool,
+  adjustIndentTool,
+  changeTextCaseTool,
 
   // Structure & Navigation
   getDocumentOutlineTool,
@@ -4552,6 +5477,7 @@ const RAW_DOCUMENT_WORKSPACE_TOOLS: ToolCatalogEntry[] = [
 
   // Table Management
   createTableTool,
+  styleTableTool,
   clearTableContentsTool,
   addTableRowTool,
   deleteTableRowTool,
@@ -4573,11 +5499,17 @@ const RAW_DOCUMENT_WORKSPACE_TOOLS: ToolCatalogEntry[] = [
   setPageSizeTool,
   setPageOrientationTool,
   setPageMarginsTool,
+  setPageColumnsTool,
+  setPageColorTool,
+  setPageBordersTool,
   updateHeaderTool,
   updateFooterTool,
   deleteHeaderTool,
   deleteFooterTool,
   insertPageNumbersTool,
+  insertWatermarkPlannedTool,
+  setDocumentViewTool,
+  setEditorPreferencesTool,
 
   // Links & Annotations
   getDocumentLinksTool,
@@ -4588,6 +5520,7 @@ const RAW_DOCUMENT_WORKSPACE_TOOLS: ToolCatalogEntry[] = [
   addDocumentCommentTool,
   resolveDocumentCommentTool,
   deleteDocumentCommentTool,
+  insertCaptionTool,
 
   // Review & Quality
   checkSpellingTool,
@@ -4598,11 +5531,13 @@ const RAW_DOCUMENT_WORKSPACE_TOOLS: ToolCatalogEntry[] = [
   checkAccessibilityTool,
   createReviewReportTool,
 
-  // Export
+  // Export & Print
   exportAsPdfTool,
   exportAsDocxTool,
   exportAsTxtTool,
   exportAsHtmlTool,
+  exportAsMarkdownTool,
+  printDocumentTool,
 
   // Version Management
   getDocumentVersionsTool,
@@ -4611,11 +5546,10 @@ const RAW_DOCUMENT_WORKSPACE_TOOLS: ToolCatalogEntry[] = [
   undoDocumentOperationTool,
   redoDocumentOperationTool,
 
-  // Planned
+  // Rich Academic & Math
   insertEquationPlannedTool,
   insertFootnotePlannedTool,
   insertEndnotePlannedTool,
-  insertWatermarkPlannedTool,
   insertBookmarkPlannedTool,
 ];
 
@@ -4660,6 +5594,22 @@ export const DOCUMENT_WORKSPACE_TOOLS: ToolCatalogEntry[] = RAW_DOCUMENT_WORKSPA
         const docId = documentId || context.activeDocument?.id || context.workspaceId || '';
         const actionId = `act-${action.slice(0, 8)}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
         const fullPayload = { ...payload, documentId: docId };
+
+        // Synchronous server pre-validation before dispatching or returning success
+        if (typeof window === 'undefined' && context.activeDocument) {
+          const check = validateActionAgainstActiveDoc(context.activeDocument, action, fullPayload);
+          if (!check.ok) {
+            return {
+              success: false,
+              status: 'VALIDATION_FAILED',
+              statusCode: 'ERROR_NOT_FOUND',
+              error: check.error,
+              documentId: docId,
+              action,
+            };
+          }
+        }
+
         capturedAction = {
           actionId,
           action,

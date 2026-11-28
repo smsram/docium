@@ -229,6 +229,18 @@ body {
   padding: 0 1px;
 }
 
+.tiptap .docium-find-match {
+  background-color: rgba(250, 204, 21, 0.42);
+  border-radius: 2px;
+  box-shadow: 0 0 0 1px rgba(202, 138, 4, 0.35);
+}
+
+.tiptap .docium-find-match-active {
+  background-color: rgba(249, 115, 22, 0.45);
+  border-radius: 2px;
+  box-shadow: 0 0 0 2px rgba(234, 88, 12, 0.85);
+}
+
 .tiptap ul {
   list-style-type: disc;
   padding-left: 1.5rem;
@@ -602,9 +614,88 @@ body {
 /* ─────────────────────────────────────────────────────────────────────────────
    Native Print / Ctrl+P — Print ONLY the Document Pages cleanly
    ───────────────────────────────────────────────────────────────────────── */
+/* Document Page Mutation Animations */
+@keyframes dociumNodeInsert {
+  0% {
+    opacity: 0;
+    transform: translateY(7px);
+    background-color: rgba(36, 92, 69, 0.14);
+  }
+  45% {
+    opacity: 1;
+    transform: translateY(0);
+    background-color: rgba(36, 92, 69, 0.08);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0);
+    background-color: transparent;
+  }
+}
+
+@keyframes dociumNodeUpdate {
+  0% {
+    background-color: rgba(36, 92, 69, 0.16);
+    box-shadow: 0 0 0 2px rgba(36, 92, 69, 0.18);
+  }
+  100% {
+    background-color: transparent;
+    box-shadow: 0 0 0 0 rgba(36, 92, 69, 0);
+  }
+}
+
+@keyframes dociumLayoutPulse {
+  0% {
+    box-shadow: 0 2px 12px rgba(0, 0, 0, 0.08), 0 0 0 3px rgba(36, 92, 69, 0.25);
+  }
+  100% {
+    box-shadow: 0 2px 12px rgba(0, 0, 0, 0.08), 0 0 0 0 rgba(36, 92, 69, 0);
+  }
+}
+
+@keyframes dociumCanvasSoft {
+  0% {
+    opacity: 0.72;
+  }
+  100% {
+    opacity: 1;
+  }
+}
+
+.docium-animate-insert {
+  animation: dociumNodeInsert 0.58s cubic-bezier(0.22, 1, 0.36, 1) forwards;
+  border-radius: 4px;
+}
+
+.docium-animate-update {
+  animation: dociumNodeUpdate 0.65s ease-out forwards;
+  border-radius: 4px;
+}
+
+.docium-animate-layout {
+  animation: dociumLayoutPulse 0.55s ease-out;
+}
+
+.docium-animate-soft {
+  animation: dociumCanvasSoft 0.28s ease-out;
+}
+
+.docium-paper-sheet,
+.docium-paper-content {
+  transition: background-color 0.25s ease, border-color 0.25s ease;
+}
+
+/* ─────────────────────────────────────────────────────────────────────────
+   Native Print / Ctrl+P — Print ONLY the Document Pages cleanly
+   ───────────────────────────────────────────────────────────────────────── */
+#docium-print-pages {
+  display: none;
+}
+
 @media print {
   @page {
-    margin: 0;
+    size: auto;
+    margin: 0 !important;
   }
 
   html,
@@ -615,13 +706,56 @@ body {
     padding: 0 !important;
     overflow: visible !important;
     height: auto !important;
+    min-height: 0 !important;
+    max-height: none !important;
+    width: auto !important;
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
   }
 
-  aside,
-  header,
-  nav,
-  footer,
+  body.docium-printing > *:not(#docium-print-pages) {
+    display: none !important;
+  }
+
+  #docium-print-pages {
+    display: block !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    background: #ffffff !important;
+  }
+
+  #docium-print-pages .docium-print-page {
+    position: relative !important;
+    overflow: hidden !important;
+    margin: 0 !important;
+    transform: none !important;
+    box-shadow: none !important;
+    page-break-after: always !important;
+    break-after: page !important;
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
+  }
+
+  #docium-print-pages .docium-print-body,
+  #docium-print-pages .docium-print-body * {
+    user-select: text !important;
+    -webkit-user-select: text !important;
+    transform: none !important;
+  }
+
+  #docium-print-pages .docium-print-page:last-child {
+    page-break-after: auto !important;
+    break-after: auto !important;
+  }
+
+  #docium-print-pages .docium-paper-sheet {
+    box-shadow: none !important;
+    border: none !important;
+    border-radius: 0 !important;
+  }
+
   .no-print,
+  .print\:hidden,
   .docium-ribbon,
   .docium-topbar,
   .workspace-ai-panel,
@@ -630,9 +764,38 @@ body {
     display: none !important;
   }
 
+  .tiptap .docium-find-match,
+  .tiptap .docium-find-match-active {
+    background-color: transparent !important;
+    box-shadow: none !important;
+  }
+
+  .docium-workspace-shell,
+  .docium-editor-shell,
+  .docium-editor-body,
+  .docium-center-column,
+  .docium-canvas-row,
+  .docium-canvas-scroller,
+  .docium-zoom-frame,
+  .docium-zoom-scaler {
+    display: block !important;
+    position: static !important;
+    height: auto !important;
+    min-height: 0 !important;
+    max-height: none !important;
+    width: auto !important;
+    min-width: 0 !important;
+    max-width: none !important;
+    overflow: visible !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    background: #ffffff !important;
+    transform: none !important;
+  }
+
   main,
   #docium-paginated-sheet {
-    position: static !important;
+    position: relative !important;
     overflow: visible !important;
     margin: 0 auto !important;
     padding: 0 !important;
@@ -644,12 +807,12 @@ body {
     box-shadow: none !important;
     border: none !important;
     border-radius: 0 !important;
-    break-after: page !important;
-    page-break-after: always !important;
   }
 
-  .docium-paper-sheet:last-child {
-    break-after: auto !important;
-    page-break-after: auto !important;
+  .docium-animate-insert,
+  .docium-animate-update,
+  .docium-animate-layout,
+  .docium-animate-soft {
+    animation: none !important;
   }
 }

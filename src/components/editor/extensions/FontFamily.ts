@@ -38,6 +38,12 @@ export const FontFamily = Mark.create({
     return [
       {
         style: 'font-family',
+        getAttrs: (value) => {
+          if (typeof value !== 'string' || !value.trim()) return false;
+          const resolved = resolveFontFamilyValue(value);
+          ensureGoogleFontLoaded(resolved);
+          return { font: resolved };
+        },
       },
     ];
   },

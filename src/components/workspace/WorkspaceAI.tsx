@@ -57,11 +57,15 @@ export function WorkspaceAI({
     createNewDocumentConversation,
     addMessageToConversation,
     updateMessageInConversation,
+    replaceAndTruncateFromMessage,
+    truncateConversationFromMessage,
     setConversationRunStatus,
     setConversationModel,
     getDocumentSources,
     addDocumentSource,
     removeDocumentSource,
+    documentSources,
+    itemSources,
     sources: workspaceSources,
     getAiPanelState,
     updateAiPanelState,
@@ -71,6 +75,7 @@ export function WorkspaceAI({
     apiKeys,
     activeModel,
     cloudflareConfig,
+    specializedModels,
     documents,
     sheets,
     slides,
@@ -125,10 +130,51 @@ export function WorkspaceAI({
     activeConversation?.runStatus === 'executing_tool' ||
     activeConversation?.runStatus === 'generating';
 
-  // Active sources: prioritize conversation-specific sources, fall back to document sources
-  const activeSources = (activeConversation?.sources && activeConversation.sources.length > 0)
-    ? activeConversation.sources
-    : getDocumentSources(workspaceId);
+  // Active sources: merge conversation-specific sources and reactive workspace document sources (deduped by id, contentHash, and title+size)
+  const wsDocSources = documentSources?.[workspaceId];
+  const wsItemSources = itemSources?.[workspaceId];
+  const activeSources = React.useMemo(() => {
+    const merged: ResearchSource[] = [];
+    const byId = new Map<string, number>();
+    const byHash = new Map<string, number>();
+    const byTitleSize = new Map<string, number>();
+
+    const combined = [
+      ...(wsDocSources || []),
+      ...(wsItemSources || []),
+      ...workspaceSources.filter((s) => s.workspaceId === workspaceId),
+      ...(activeConversation?.sources || []),
+    ];
+
+    for (const s of combined) {
+      if (!s || !s.id) continue;
+      const hashKey = s.contentHash ? s.contentHash.toLowerCase() : '';
+      const titleKey = s.title ? `${s.title.toLowerCase()}::${(s.fileSize || '').toLowerCase()}` : '';
+      const titleOnly = s.title ? s.title.toLowerCase() : '';
+
+      const existingIdx =
+        byId.get(s.id) ??
+        (hashKey ? byHash.get(hashKey) : undefined) ??
+        (titleKey ? byTitleSize.get(titleKey) : undefined) ??
+        (titleOnly && !s.fileSize ? byTitleSize.get(`${titleOnly}::`) : undefined);
+
+      if (existingIdx !== undefined) {
+        const existing = merged[existingIdx];
+        // Prefer richer server-indexed record over lightweight placeholder
+        if (!existing.extractedText && s.extractedText) {
+          merged[existingIdx] = { ...existing, ...s };
+        }
+        continue;
+      }
+
+      const idx = merged.length;
+      merged.push(s);
+      byId.set(s.id, idx);
+      if (hashKey) byHash.set(hashKey, idx);
+      if (titleKey) byTitleSize.set(titleKey, idx);
+    }
+    return merged;
+  }, [activeConversation?.sources, wsDocSources, wsItemSources, workspaceSources, workspaceId]);
 
   const isSearchConfigured = Boolean(
     providers.brave?.apiKey ||
@@ -255,54 +301,22 @@ export function WorkspaceAI({
   // ==========================================
   // SEND MESSAGE & ORCHESTRATION STREAMING
   // ==========================================
-  const handleSendMessage = async (textToSend?: string) => {
-    const promptText = (textToSend || input).trim();
-    if (!promptText && composerAttachments.length === 0) return;
-    if (isGenerating) return;
+  const executeAssistantTurn = async (params: {
+    promptText: string;
+    targetConversationId: string;
+    currentAttachments: Array<{ id?: string; name: string; size?: string; type: string; url?: string }>;
+    conversationHistoryOverride?: AiChatMessage[];
+  }) => {
+    const { promptText, targetConversationId, currentAttachments, conversationHistoryOverride } = params;
 
-    setInput('');
-    const currentAttachments = [...composerAttachments];
-    setComposerAttachments([]);
-
-    // Auto-generate conversation title from first prompt if default title
-    if (
-      promptText &&
-      (activeConversation.messages.length === 0 ||
-        activeConversation.title.startsWith('Chat ') ||
-        activeConversation.title === 'Workspace Conversation' ||
-        activeConversation.title.startsWith('Conversation '))
-    ) {
-      const autoTitle = promptText.length > 28 ? promptText.slice(0, 28).trim() + '...' : promptText;
-      handleRenameConversation(activeConversation.id, autoTitle);
-    }
-
-    const targetConversationId = activeConversation.id;
-
-    // 1. Add User Message
-    const userMessageId = createMessageId('msg-user');
-    const userMessage: AiChatMessage = {
-      id: userMessageId,
-      role: 'user',
-      content: promptText,
-      timestamp: 'Just now',
-      attachments: currentAttachments.map((a) => ({
-        name: a.name,
-        size: a.size,
-        type: a.type,
-        url: a.url,
-      })),
-    };
-
-    addMessageToConversation(workspaceId, targetConversationId, userMessage);
-
-    // 2. Add Assistant Streaming Placeholder
+    // Add Assistant Streaming Placeholder
     const assistantMessageId = createMessageId('msg-assistant');
     const generationStartTime = Date.now();
     const assistantPlaceholder: AiChatMessage = {
       id: assistantMessageId,
       role: 'assistant',
       content: '',
-      timestamp: 'Just now',
+      timestamp: new Date().toISOString(),
       runStatus: 'preparing',
       activityEvents: [{
         id: createMessageId('act-init'),
@@ -362,8 +376,11 @@ export function WorkspaceAI({
         content: errorMsg,
         runStatus: 'failed',
         error: errorMsg,
+        generationEndTime: Date.now(),
         activityEvents: [
-          ...accumulatedEvents,
+          ...accumulatedEvents.map((e) =>
+            e.status === 'running' ? { ...e, status: 'failed' as const, safeSummary: errorMsg } : e
+          ),
           {
             id: createMessageId('act-err'),
             eventType: 'error',
@@ -375,25 +392,51 @@ export function WorkspaceAI({
         ],
       });
       setConversationRunStatus(workspaceId, targetConversationId, 'failed');
+      setStreamingMessageId(null);
       return;
     }
 
-    // Resolve @file mentions and manual @attach source references strictly from current workspace
+    // Snapshot authoritative current-workspace sources directly from store + activeSources (deduped by id & hash)
+    const latestState = useWorkspaceStore.getState();
+    const authoritativeSources: ResearchSource[] = [];
+    const seenAuthIds = new Set<string>();
+    const seenAuthHashes = new Set<string>();
+    const seenAuthNames = new Set<string>();
+    for (const s of [
+      ...activeSources,
+      ...(latestState.documentSources?.[workspaceId] || []),
+      ...(latestState.itemSources?.[workspaceId] || []),
+      ...(latestState.sources || []).filter((s) => s.workspaceId === workspaceId),
+    ]) {
+      if (!s || !s.id) continue;
+      const hashK = s.contentHash?.toLowerCase() || '';
+      const nameK = `${s.title.toLowerCase()}::${(s.fileSize || '').toLowerCase()}`;
+      if (seenAuthIds.has(s.id) || (hashK && seenAuthHashes.has(hashK)) || seenAuthNames.has(nameK)) {
+        continue;
+      }
+      seenAuthIds.add(s.id);
+      if (hashK) seenAuthHashes.add(hashK);
+      seenAuthNames.add(nameK);
+      authoritativeSources.push(s);
+    }
+
+    // Resolve @file mentions and manual @attach source references strictly from current workspace document sources
     const mentionMatches = Array.from(
       promptText.matchAll(
-        /@(?:attach\s*\(\s*["']?([^"')]+)["']?\s*\)|([a-zA-Z0-9_\-\.\s]+\.[a-zA-Z0-9]{2,5})|([^@\s,;:!?()]+\.[a-zA-Z0-9]{2,5}))/gi
+        /(?:^|\s)@(?:attach\s*\(\s*["']?([^"')]+)["']?\s*\)|([a-zA-Z0-9_\-\.\s()]+\.[a-zA-Z0-9]{2,5})|([^@\s,;:!?()]+))/gi
       )
     );
     const explicitFilenames = mentionMatches.map((m) => (m[1] || m[2] || m[3] || '').trim()).filter(Boolean);
 
-    // Resolve explicit sources strictly from current workspace sources
     const resolvedExplicitSources: ResearchSource[] = [];
     for (const name of explicitFilenames) {
-      const match = activeSources.find(
+      const lowerName = name.toLowerCase();
+      const match = authoritativeSources.find(
         (s: ResearchSource) =>
-          s.title.toLowerCase() === name.toLowerCase() ||
-          s.id.toLowerCase() === name.toLowerCase() ||
-          s.title.toLowerCase().startsWith(name.toLowerCase())
+          s.title.toLowerCase() === lowerName ||
+          s.id.toLowerCase() === lowerName ||
+          s.title.toLowerCase().startsWith(lowerName) ||
+          s.title.toLowerCase().replace(/\.[^/.]+$/, '') === lowerName.replace(/\.[^/.]+$/, '')
       );
       if (match && !resolvedExplicitSources.some((r) => r.id === match.id)) {
         resolvedExplicitSources.push(match);
@@ -401,7 +444,7 @@ export function WorkspaceAI({
     }
 
     for (const att of currentAttachments) {
-      const match = activeSources.find(
+      const match = authoritativeSources.find(
         (s: ResearchSource) => s.id === att.id || s.title.toLowerCase() === att.name.toLowerCase()
       );
       if (match && !resolvedExplicitSources.some((r) => r.id === match.id)) {
@@ -409,15 +452,13 @@ export function WorkspaceAI({
       }
     }
 
-    // Combined sources prioritizing explicit references, STRICTLY from current workspace
     const prioritizedSources = [...resolvedExplicitSources];
-    for (const s of activeSources) {
+    for (const s of authoritativeSources) {
       if (!prioritizedSources.some((c) => c.id === s.id)) {
         prioritizedSources.push(s);
       }
     }
 
-    // Resolve separate search provider configuration (decoupled from reasoning AI)
     const configuredSearchProvider = (['tavily', 'brave', 'serper', 'searxng', 'serpapi'] as const).find(
       (pId) => Boolean(providers[pId]?.apiKey) || (providers[pId]?.isAdded && providers[pId]?.status === 'connected')
     );
@@ -435,7 +476,6 @@ export function WorkspaceAI({
       slides.find((sl) => sl.id === workspaceId) ||
       pdfs.find((p) => p.id === workspaceId);
 
-    // Strict Architectural Workspace Isolation: Pass ONLY files belonging to the active workspace
     const workspaceFiles: WorkspaceFileRecord[] = currentActiveDoc
       ? [
           {
@@ -475,6 +515,15 @@ export function WorkspaceAI({
     }
 
     const userTimeZone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'Asia/Kolkata';
+    const historyToSend =
+      conversationHistoryOverride ||
+      useWorkspaceStore.getState().documentConversations?.[workspaceId]?.find((c) => c.id === targetConversationId)?.messages ||
+      activeConversation.messages ||
+      [];
+
+    const accumulatedBlocks: StructuredContentBlock[] = [];
+    const accumulatedCitations: Array<{ sourceId: string; sourceTitle: string; page?: number; snippet: string; url?: string }> = [];
+    const processedActionIds = new Set<string>();
 
     try {
       const response = await fetch('/api/ai/agent', {
@@ -489,7 +538,7 @@ export function WorkspaceAI({
           attachments: currentAttachments,
           attachedSources: prioritizedSources,
           explicitSourceIds: resolvedExplicitSources.map((s) => s.id),
-          conversationHistory: activeConversation.messages || [],
+          conversationHistory: historyToSend,
           scratchpad: activeConversation.scratchpad || '',
           providerId: activeProviderId,
           modelId: resolvedModel,
@@ -516,11 +565,6 @@ export function WorkspaceAI({
         throw new Error(`Agent request failed (${response.status}): ${errText || 'Network error'}`);
       }
 
-      const accumulatedBlocks: StructuredContentBlock[] = [];
-      const accumulatedCitations: Array<{ sourceId: string; sourceTitle: string; page?: number; snippet: string; url?: string }> = [];
-      const processedActionIds = new Set<string>();
-
-      // Single-owner response stream consumption (guarantees reader lock is never released during read)
       await streamingSessionManager.consumeResponseStream({
         conversationId: targetConversationId,
         requestId,
@@ -595,7 +639,23 @@ export function WorkspaceAI({
             accumulatedBlocks.push(block);
           },
           onCitation: (citation) => {
-            accumulatedCitations.push(citation);
+            const key = citation.url
+              ? `url:${citation.url}`
+              : `src:${(citation.sourceId || citation.sourceTitle || '').toLowerCase()}`;
+            const existingIdx = accumulatedCitations.findIndex((c) => {
+              const cKey = c.url
+                ? `url:${c.url}`
+                : `src:${(c.sourceId || c.sourceTitle || '').toLowerCase()}`;
+              return cKey === key;
+            });
+            if (existingIdx === -1) {
+              accumulatedCitations.push(citation);
+            } else if (citation.page && !accumulatedCitations[existingIdx].page) {
+              accumulatedCitations[existingIdx] = {
+                ...accumulatedCitations[existingIdx],
+                page: citation.page,
+              };
+            }
           },
           onStatus: (status) => {
             setConversationRunStatus(workspaceId, targetConversationId, status);
@@ -642,7 +702,6 @@ export function WorkspaceAI({
               if (res) actionResult = res;
             }
 
-            // Fallback to central editorRegistry only if onApplyEditorAction prop was not provided
             if (!actionResult) {
               const targetDoc = (event.payload?.documentId as string) || workspaceId;
               const regResult = await editorRegistry.executeAction(
@@ -670,7 +729,7 @@ export function WorkspaceAI({
                     eventType: 'editor_action_verified',
                     label: 'Verifying the changes',
                     status: 'completed',
-                    safeSummary: 'The document changes have been verified and applied to the active page.',
+                    safeSummary: actionResult.summary || 'The document changes have been verified and applied to the active page.',
                     timestamp: new Date().toISOString(),
                   }
                 : {
@@ -753,27 +812,32 @@ export function WorkspaceAI({
               runStatus: 'failed',
               error: errorMsg,
               activityEvents: finalEvents,
+              generationEndTime: Date.now(),
             });
           },
         },
       });
     } catch (err: unknown) {
       const errorMsg = err instanceof Error ? err.message : 'Generation interrupted';
-      const isAbort = err instanceof Error && err.name === 'AbortError';
+      const isAbort = (err instanceof Error && err.name === 'AbortError') || abortController.signal.aborted;
       const finalStatus = isAbort ? 'cancelled' : 'failed';
-      const finalEvents: AgentActivityEvent[] = accumulatedEvents.map((e) =>
+      const snap = streamingSessionManager.getSnapshot(targetConversationId);
+      const sourceEvents = (snap.activityEvents && snap.activityEvents.length > 0 ? snap.activityEvents : accumulatedEvents);
+      const finalEvents: AgentActivityEvent[] = sourceEvents.map((e) =>
         e.status === 'running'
-          ? { ...e, status: (isAbort ? 'completed' : 'failed') as 'completed' | 'failed', safeSummary: isAbort ? 'Cancelled' : errorMsg }
+          ? { ...e, status: (isAbort ? 'completed' : 'failed') as 'completed' | 'failed', safeSummary: isAbort ? 'Stopped' : errorMsg }
           : e
       );
-      const sessionContent = streamingSessionManager.getSnapshot(targetConversationId).content;
       setConversationRunStatus(workspaceId, targetConversationId, finalStatus);
       updateMessageInConversation(workspaceId, targetConversationId, assistantMessageId, {
-        content: sessionContent || (isAbort ? 'Generation cancelled.' : errorMsg),
+        content: snap.content || (isAbort ? 'Generation stopped.' : errorMsg),
         status: isAbort ? 'completed' : 'failed',
         runStatus: finalStatus,
         error: isAbort ? undefined : errorMsg,
         activityEvents: finalEvents,
+        contentBlocks: accumulatedBlocks,
+        citations: accumulatedCitations,
+        generationEndTime: Date.now(),
       });
     } finally {
       abortControllerRef.current = null;
@@ -781,8 +845,54 @@ export function WorkspaceAI({
     }
   };
 
+  const handleSendMessage = async (textToSend?: string) => {
+    const promptText = (textToSend || input).trim();
+    if (!promptText && composerAttachments.length === 0) return;
+    if (isGenerating) return;
+
+    setInput('');
+    const currentAttachments = [...composerAttachments];
+    setComposerAttachments([]);
+
+    // Auto-generate conversation title from first prompt if default title
+    if (
+      promptText &&
+      (activeConversation.messages.length === 0 ||
+        activeConversation.title.startsWith('Chat ') ||
+        activeConversation.title === 'Workspace Conversation' ||
+        activeConversation.title.startsWith('Conversation '))
+    ) {
+      const autoTitle = promptText.length > 28 ? promptText.slice(0, 28).trim() + '...' : promptText;
+      handleRenameConversation(activeConversation.id, autoTitle);
+    }
+
+    const targetConversationId = activeConversation.id;
+
+    // 1. Add User Message with real ISO timestamp
+    const userMessageId = createMessageId('msg-user');
+    const userMessage: AiChatMessage = {
+      id: userMessageId,
+      role: 'user',
+      content: promptText,
+      timestamp: new Date().toISOString(),
+      attachments: currentAttachments.map((a) => ({
+        name: a.name,
+        size: a.size,
+        type: a.type,
+        url: a.url,
+      })),
+    };
+
+    addMessageToConversation(workspaceId, targetConversationId, userMessage);
+
+    await executeAssistantTurn({
+      promptText,
+      targetConversationId,
+      currentAttachments: userMessage.attachments || [],
+    });
+  };
+
   const handleStopGeneration = useCallback(() => {
-    // 1. Immediately abort active network fetch
     if (abortControllerRef.current) {
       abortControllerRef.current.abort();
       abortControllerRef.current = null;
@@ -793,30 +903,84 @@ export function WorkspaceAI({
       setConversationRunStatus(workspaceId, activeConversation.id, 'cancelled');
       const lastMsg = [...(activeConversation.messages || [])].reverse().find((m) => m.role === 'assistant');
       if (lastMsg && (lastMsg.runStatus === 'preparing' || lastMsg.runStatus === 'generating' || lastMsg.runStatus === 'executing_tool')) {
+        const finalizedEvents = (stopResult?.activityEvents || lastMsg.activityEvents || []).map((e) =>
+          e.status === 'running' ? { ...e, status: 'completed' as const, safeSummary: e.safeSummary || 'Stopped' } : e
+        );
         updateMessageInConversation(workspaceId, activeConversation.id, lastMsg.id, {
-          content: stopResult?.content || lastMsg.content || 'Generation cancelled.',
-          activityEvents: stopResult?.activityEvents || lastMsg.activityEvents,
+          content: stopResult?.content || lastMsg.content || 'Generation stopped.',
+          activityEvents: finalizedEvents,
           runStatus: 'cancelled',
           status: 'completed',
+          generationEndTime: Date.now(),
         });
       }
     }
     setStreamingMessageId(null);
   }, [activeConversation, workspaceId, setConversationRunStatus, updateMessageInConversation]);
 
-  const handleRegenerate = useCallback((messageId?: string) => {
-    const lastUserMsg = [...(activeConversation?.messages || [])].reverse().find((m) => m.role === 'user');
-    if (lastUserMsg?.content) {
-      handleSendMessage(lastUserMsg.content);
-    }
-  }, [activeConversation?.messages, handleSendMessage]);
+  const handleEditMessage = async (messageId: string, newContent: string) => {
+    const trimmed = newContent.trim();
+    if (!trimmed || !activeConversation || isGenerating) return;
 
-  const handleRetry = useCallback(() => {
-    const lastUserMsg = [...(activeConversation?.messages || [])].reverse().find((m) => m.role === 'user');
-    if (lastUserMsg?.content) {
-      handleSendMessage(lastUserMsg.content);
+    const targetConversationId = activeConversation.id;
+    const editedMsg = replaceAndTruncateFromMessage(workspaceId, targetConversationId, messageId, trimmed);
+    if (!editedMsg) return;
+
+    const updatedMsgs =
+      useWorkspaceStore.getState().documentConversations?.[workspaceId]?.find((c) => c.id === targetConversationId)?.messages || [];
+
+    await executeAssistantTurn({
+      promptText: trimmed,
+      targetConversationId,
+      currentAttachments: editedMsg.attachments || [],
+      conversationHistoryOverride: updatedMsgs,
+    });
+  };
+
+  const handleRegenerate = async (messageId?: string) => {
+    if (!activeConversation || isGenerating) return;
+    const targetConversationId = activeConversation.id;
+    const msgs = activeConversation.messages || [];
+
+    const assistantIdx = messageId
+      ? msgs.findIndex((m) => m.id === messageId)
+      : (() => {
+          for (let i = msgs.length - 1; i >= 0; i--) {
+            if (msgs[i].role === 'assistant') return i;
+          }
+          return -1;
+        })();
+
+    if (assistantIdx === -1) return;
+    const targetAssistantMsg = msgs[assistantIdx];
+
+    // Find the user message immediately preceding this assistant response
+    let userMsg: AiChatMessage | undefined;
+    for (let i = assistantIdx - 1; i >= 0; i--) {
+      if (msgs[i].role === 'user') {
+        userMsg = msgs[i];
+        break;
+      }
     }
-  }, [activeConversation?.messages, handleSendMessage]);
+    if (!userMsg || (!userMsg.content?.trim() && (!userMsg.attachments || userMsg.attachments.length === 0))) {
+      return;
+    }
+
+    truncateConversationFromMessage(workspaceId, targetConversationId, targetAssistantMsg.id);
+    const updatedMsgs =
+      useWorkspaceStore.getState().documentConversations?.[workspaceId]?.find((c) => c.id === targetConversationId)?.messages || [];
+
+    await executeAssistantTurn({
+      promptText: userMsg.content,
+      targetConversationId,
+      currentAttachments: userMsg.attachments || [],
+      conversationHistoryOverride: updatedMsgs,
+    });
+  };
+
+  const handleRetry = () => {
+    void handleRegenerate();
+  };
 
   // Safe cleanup of streams and operations on unmount
   useEffect(() => {
@@ -840,6 +1004,34 @@ export function WorkspaceAI({
     const formData = new FormData();
     formData.append('workspaceId', workspaceId);
     formData.append('conversationId', targetConvId);
+    if (embeddingConfig) {
+      formData.append('embeddingConfig', JSON.stringify(embeddingConfig));
+    }
+
+    // Pass configured vision captioning provider/credentials when available so uploaded images can be summarized once upfront
+    const visProviderId = (specializedModels?.vision?.providerId || convProviderId) as ProviderId;
+    const visModelId = specializedModels?.vision?.modelId || convModelId;
+    const visProviderCfg = providers[visProviderId];
+    const visApiKey =
+      visProviderCfg?.apiKey ||
+      (apiKeys as Record<string, string>)?.[visProviderId] ||
+      (visProviderId === 'cloudflare' ? cloudflareConfig?.apiToken : '') ||
+      '';
+    const visAccountId =
+      visProviderCfg?.accountId ||
+      (visProviderId === 'cloudflare' ? cloudflareConfig?.accountId : undefined);
+    if (visProviderId && (visApiKey || visProviderId === 'ollama' || visProviderId === 'custom')) {
+      formData.append(
+        'visionConfig',
+        JSON.stringify({
+          providerId: visProviderId,
+          modelId: visModelId,
+          apiKey: visApiKey,
+          baseUrl: visProviderCfg?.baseUrl,
+          accountId: visAccountId,
+        })
+      );
+    }
 
     Array.from(files).forEach((f) => formData.append('files', f));
 
@@ -855,16 +1047,21 @@ export function WorkspaceAI({
 
         for (const src of sources) {
           addDocumentSource(workspaceId, src);
-          setComposerAttachments((prev) => [
-            ...prev,
-            {
-              id: src.id,
-              name: src.title,
-              size: src.fileSize || 'File',
-              type: src.mimeType || 'document',
-              url: (src as any).extractedImages?.[0]?.url,
-            },
-          ]);
+          setComposerAttachments((prev) => {
+            if (prev.some((a) => a.id === src.id || a.name.toLowerCase() === src.title.toLowerCase())) {
+              return prev;
+            }
+            return [
+              ...prev,
+              {
+                id: src.id,
+                name: src.title,
+                size: src.fileSize || 'File',
+                type: src.mimeType || 'document',
+                url: (src as any).extractedImages?.[0]?.url,
+              },
+            ];
+          });
           // Ingest into semantic vector index safely without breaking upload
           try {
             ingestSource(src, workspaceId, embeddingConfig);
@@ -1021,7 +1218,7 @@ export function WorkspaceAI({
   // ==========================================
   if (panelState.mode === 'minimized' && !fullWidth) {
     return (
-      <div className="fixed bottom-5 right-5 z-40">
+      <div className="workspace-ai-panel print:hidden fixed bottom-5 right-5 z-40">
         <button
           type="button"
           onClick={() => updateAiPanelState(workspaceId, { mode: 'compact' })}
@@ -1039,7 +1236,7 @@ export function WorkspaceAI({
   // ==========================================
   if (panelState.mode === 'compact' && !fullWidth) {
     return (
-      <div className="fixed bottom-5 right-5 z-40 w-96 max-w-[92vw] rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-3 shadow-2xl space-y-2.5 animate-in slide-in-from-bottom-4 duration-150">
+      <div className="workspace-ai-panel print:hidden fixed bottom-5 right-5 z-40 w-96 max-w-[92vw] rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-3 shadow-2xl space-y-2.5 animate-in slide-in-from-bottom-4 duration-150">
         <div className="flex items-center justify-between pb-2 border-b border-[var(--border-subtle)]">
           <div className="flex items-center gap-2 min-w-0">
             <AiAvatar size="xs" isGenerating={isGenerating} />
@@ -1106,7 +1303,7 @@ export function WorkspaceAI({
   return (
     <div
       style={fullWidth ? undefined : { width: `${panelState.preferredWidth}px` }}
-      className={`relative flex flex-col h-full bg-[var(--surface)] shrink-0 transition-[width] duration-75 ${
+      className={`workspace-ai-panel print:hidden relative flex flex-col h-full bg-[var(--surface)] shrink-0 transition-[width] duration-75 ${
         fullWidth
           ? 'w-full rounded-2xl border border-[var(--border)] shadow-xs overflow-hidden'
           : 'border-l border-[var(--border)]'
@@ -1165,6 +1362,7 @@ export function WorkspaceAI({
             isGenerating={isGenerating}
             streamingMessageId={streamingMessageId}
             onRegenerate={handleRegenerate}
+            onEditMessage={handleEditMessage}
             onRetry={handleRetry}
             messagesEndRef={messagesEndRef}
           />
@@ -1188,6 +1386,7 @@ export function WorkspaceAI({
         currentModelId={convModelId}
         onSelectModel={handleSelectModel}
         workspaceId={workspaceId}
+        workspaceSources={activeSources}
         onMentionSelect={handleMentionSelect}
       />
     </div>
